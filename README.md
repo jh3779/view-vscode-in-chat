@@ -111,3 +111,4 @@ npm test     # node --test, 외부 의존성 없음
 ## 라이선스
 
 MIT — [LICENSE](LICENSE) 참고.
+
