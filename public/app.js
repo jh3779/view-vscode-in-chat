@@ -12,6 +12,8 @@
     ['/who', '접속자 목록'],
     ['/me', '<행동>  행동 메시지'],
     ['/clear', '화면 지우기 (내 화면만)'],
+    ['/cli', '내 에이전트 창 보기 (나만 보임)'],
+    ['/agent', '에이전트 사용법 (터미널 클라이언트에서 실행)'],
   ];
 
   const params = new URLSearchParams(location.search);
@@ -35,7 +37,19 @@
     suggestIdx: 0,
     typing: new Map(), // userId -> { nick, color, channel, ts }
     lastTypingSent: 0,
+    key: '',
+    cli: [], // 내 CLI 대화창 — 서버가 같은 키를 가진 내 연결에만 보낸다
+    cliTyping: null,
   };
+
+  // CLI 대화창 소유권 키. 이 브라우저에만 저장된다.
+  const CLI_TAB = 'claude.cli';
+  state.key = safeGet('vschat.key') || '';
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(state.key)) {
+    state.key = crypto.randomUUID().replace(/-/g, '');
+    safeSet('vschat.key', state.key);
+  }
+  const isCli = () => state.active === CLI_TAB;
 
   function safeGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
   function safeSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
@@ -53,12 +67,13 @@
 
   // inline: `code`, @mention, URL — built as DOM nodes (no innerHTML)
   function renderInline(parent, text) {
-    const re = /(`[^`\n]+`)|(@[^\s@]+)|(https?:\/\/[^\s]+)/g;
+    const re = /(`[^`\n]+`)|(@[^\s@]+)|(https?:\/\/[^\s]+)|(\*\*[^*\n]+\*\*)/g;
     let last = 0, m;
     while ((m = re.exec(text))) {
       if (m.index > last) parent.append(text.slice(last, m.index));
       if (m[1]) parent.append(el('code', null, m[1].slice(1, -1)));
-      else if (m[2]) parent.append(el('span', 'mention', m[2]));
+      else if (m[2]) parent.append(el('span', /^@claude$/i.test(m[2]) ? 'mention agent' : 'mention', m[2]));
+      else if (m[4]) parent.append(el('b', null, m[4].slice(2, -2)));
       else {
         const a = el('a', null, m[3]);
         a.href = m[3]; a.target = '_blank'; a.rel = 'noopener noreferrer';
@@ -80,16 +95,33 @@
 
   function msgNode(m) {
     const mine = state.me && m.userId === state.me.id;
-    const kind = m.type === 'chat' ? (mine ? 'mine' : '') : m.type;
-    const row = el('div', `msg ${kind}`);
-    const bullet = m.type === 'system' ? '⏺' : m.type === 'local' ? '⎿' : m.type === 'error' ? '✗' : mine ? '>' : '⏺';
+    const own = mine || m.type === 'cli';
+    const kind = m.type === 'chat' || m.type === 'cli' ? (own ? 'mine' : '') : m.type === 'agent' ? 'chat' : m.type;
+    const row = el('div', `msg ${kind}${m.agent || m.type === 'agent' || m.type === 'agent-log' ? ' agent' : ''}`);
+    const bullet = m.type === 'system' || m.type === 'agent-log' ? '⏺' : m.type === 'local' ? '⎿' : m.type === 'error' ? '✗' : own ? '>' : '⏺';
     row.append(el('span', 'bullet', bullet));
     const col = el('div');
-    if (m.type === 'chat' || m.type === 'action') {
+    if (m.type === 'agent-log') {
+      const [call, ...rest] = m.text.split('\n');
+      const paren = call.indexOf('(');
+      const head = el('div', 'tool');
+      head.append(el('b', null, paren > 0 ? call.slice(0, paren) : call), paren > 0 ? call.slice(paren) : '');
+      col.append(head, el('div', 'tool-out', rest.join('\n')));
+      row.append(col);
+      return row;
+    }
+    if (m.type === 'cli') {
+      col.append(renderBody(m.text));
+      row.append(col);
+      return row;
+    }
+    if (m.type === 'chat' || m.type === 'action' || m.type === 'agent') {
       const head = el('div', 'head');
       const nick = el('span', 'nick', m.nick);
       nick.style.color = m.color;
-      head.append(nick, el('span', 'time', time(m.ts)));
+      head.append(nick);
+      if (m.agent || m.type === 'agent') head.append(el('span', 'tag', 'agent'));
+      head.append(el('span', 'time', time(m.ts)));
       if (m.type === 'action') col.append(renderBody(`* ${m.nick} ${m.text}`));
       else { col.append(head); col.append(renderBody(m.text)); }
     } else if (m.type === 'system' && m.text.includes('\n')) {
@@ -105,6 +137,20 @@
     }
     row.append(col);
     return row;
+  }
+
+  function cliBanner() {
+    const wrap = el('div');
+    const box = el('div', 'welcome');
+    const t = el('div', 't');
+    t.append(el('span', 'star', '✻ '), 'Welcome to ', el('b', null, 'claude.cli'), '!');
+    box.append(t, el('div', 'gap'));
+    box.append(el('div', 'd', '  이 창은 나만 볼 수 있습니다 — 방의 다른 사람은 내용도 존재도 보지 못합니다.'));
+    box.append(el('div', 'gap'));
+    box.append(el('div', 'd', `  실행:  터미널에서  node cli.js ${location.host}`));
+    box.append(el('div', 'd', '  입력:  터미널에서 /cli 로 들어가 질문하면 여기에도 함께 보입니다'));
+    wrap.append(box);
+    return wrap;
   }
 
   function banner(ch) {
@@ -124,7 +170,7 @@
     [
       '1. 다른 기기에서 위 host 주소로 접속하면 함께 대화할 수 있습니다',
       '2. @닉네임 으로 멘션하고, ``` 로 코드 블록을 보낼 수 있습니다',
-      '3. /join <채널> 로 새 채널을 만들 수 있습니다',
+      '3. 터미널 클라이언트(node cli.js)에서 @claude 로 본인 키를 써서 에이전트를 부를 수 있습니다',
     ].forEach((x) => tips.append(el('div', null, ` ${x}`)));
     wrap.append(tips);
     return wrap;
@@ -138,6 +184,11 @@
 
   // ---------- UI state ----------
   function renderChannelView() {
+    if (isCli()) {
+      log.replaceChildren(cliBanner());
+      for (const m of state.cli) log.append(msgNode(m));
+      return scrollDown();
+    }
     log.replaceChildren(banner(state.active));
     for (const m of state.history[state.active] || []) log.append(msgNode(m));
     scrollDown();
@@ -147,8 +198,9 @@
     const tabs = $('tabs');
     tabs.replaceChildren();
     for (const ch of state.tabs) {
-      const t = el('div', 'tab' + (ch === state.active ? ' active' : ''));
-      t.append(el('span', 'ico', '#'), el('span', null, `${ch}.chat`));
+      const cli = ch === CLI_TAB;
+      const t = el('div', 'tab' + (ch === state.active ? ' active' : '') + (cli ? ' cli' : ''));
+      t.append(el('span', 'ico', cli ? '✻' : '#'), el('span', null, cli ? ch : `${ch}.chat`));
       const close = el('span', state.unread[ch] ? 'close' : 'close', '×');
       if (state.unread[ch] && ch !== state.active) { close.textContent = ''; close.append(el('span', 'mod')); close.style.visibility = 'visible'; }
       close.onclick = (e) => { e.stopPropagation(); closeTab(ch); };
@@ -168,6 +220,10 @@
       li.onclick = () => openChannel(ch);
       ul.append(li);
     }
+    const mine = el('li', (isCli() ? 'active ' : '') + 'agent');
+    mine.append(el('span', 'ico star', '✻'), el('span', null, CLI_TAB), el('span', 'state', '나만 보임'));
+    mine.onclick = () => openChannel(CLI_TAB);
+    ul.append(mine);
   }
 
   function renderUsers() {
@@ -178,6 +234,7 @@
       const dot = el('span', 'dot');
       dot.style.background = u.color;
       li.append(dot, el('span', null, u.nick));
+      if (u.kind === 'cli') li.append(el('span', 'state', '>_ cli'));
       li.onclick = () => { input.value += `@${u.nick} `; input.focus(); };
       ul.append(li);
     }
@@ -187,10 +244,11 @@
   }
 
   function renderChrome() {
-    $('title').textContent = `${state.active}.chat — ${location.host}`;
-    document.title = `#${state.active}`;
-    $('breadcrumbs').textContent = `chat › ${state.active}.chat`;
-    $('sbChannel').textContent = `#${state.active}`;
+    const label = isCli() ? CLI_TAB : `${state.active}.chat`;
+    $('title').textContent = `${label} — ${location.host}`;
+    document.title = isCli() ? CLI_TAB : `#${state.active}`;
+    $('breadcrumbs').textContent = isCli() ? `chat › ${CLI_TAB}  (나만 보임)` : `chat › ${label}`;
+    $('sbChannel').textContent = isCli() ? CLI_TAB : `#${state.active}`;
     $('sbNick').textContent = state.me ? `👤 ${state.me.nick}` : '';
     renderTabs();
     renderChannels();
@@ -221,7 +279,7 @@
   function connect() {
     if (state.es) state.es.close();
     setConn(false, '연결 중…');
-    const es = new EventSource(`/events?nick=${encodeURIComponent(state.nick)}`);
+    const es = new EventSource(`/events?key=${encodeURIComponent(state.key)}&nick=${encodeURIComponent(state.nick)}`);
     state.es = es;
 
     es.addEventListener('welcome', (e) => {
@@ -231,7 +289,9 @@
       state.history = d.history;
       state.users = d.users;
       state.addresses = d.addresses;
-      state.tabs = state.tabs.filter((t) => state.channels.includes(t));
+      state.cli = d.cli || [];
+      if (d.key && d.key !== state.key) { state.key = d.key; safeSet('vschat.key', d.key); }
+      state.tabs = state.tabs.filter((t) => state.channels.includes(t) || t === CLI_TAB);
       if (!state.tabs.length) state.tabs = ['general'];
       if (!state.tabs.includes(state.active)) state.active = state.tabs[0];
       $('sbAddr').textContent = d.addresses[0] ? `⇄ ${d.addresses[0].replace('http://', '')}` : '';
@@ -258,11 +318,34 @@
         document.title = `(●) #${state.active}`;
       }
     });
+    es.addEventListener('cli-message', (e) => {
+      const m = JSON.parse(e.data);
+      state.cli.push(m);
+      if (state.cli.length > 200) state.cli.shift();
+      if (isCli()) {
+        const stick = atBottom() || m.type === 'cli';
+        log.append(msgNode(m));
+        if (stick) scrollDown();
+      } else if (m.type === 'agent') {
+        state.unread[CLI_TAB] = (state.unread[CLI_TAB] || 0) + 1;
+        renderChrome();
+      }
+    });
+    es.addEventListener('cli-typing', (e) => {
+      const t = JSON.parse(e.data);
+      state.cliTyping = { ...t, ts: Date.now(), start: t.since || Date.now() };
+      renderTyping();
+    });
+    es.addEventListener('cli-typing-end', () => { state.cliTyping = null; renderTyping(); });
     es.addEventListener('typing', (e) => {
       const t = JSON.parse(e.data);
       if (t.userId === state.me?.id) return;
-      state.typing.set(t.userId, { ...t, ts: Date.now() });
+      const prev = state.typing.get(t.userId);
+      state.typing.set(t.userId, { ...t, ts: Date.now(), start: t.since || prev?.start || Date.now() });
       renderTyping();
+    });
+    es.addEventListener('typing-end', (e) => {
+      if (state.typing.delete(JSON.parse(e.data).userId)) renderTyping();
     });
     es.addEventListener('users', (e) => { state.users = JSON.parse(e.data); renderUsers(); });
     es.addEventListener('channels', (e) => { state.channels = JSON.parse(e.data); renderChannels(); });
@@ -281,8 +364,11 @@
   function renderTyping() {
     const box = $('typing');
     const now = Date.now();
+    if (state.cliTyping && now - state.cliTyping.ts > 3500) state.cliTyping = null;
     for (const [id, t] of state.typing) if (now - t.ts > 3500) state.typing.delete(id);
-    const here = [...state.typing.values()].filter((t) => t.channel === state.active);
+    const here = isCli()
+      ? (state.cliTyping ? [{ ...state.cliTyping, agent: true }] : [])
+      : [...state.typing.values()].filter((t) => t.channel === state.active);
     if (!here.length) {
       box.hidden = true;
       clearInterval(spinTimer);
@@ -290,14 +376,19 @@
       return;
     }
     box.hidden = false;
-    const names = here.map((t) => t.nick).join(', ');
-    const verb = VERBS[Math.floor(here[0].ts / 1000) % VERBS.length];
-    const secs = Math.max(1, Math.round((now - Math.min(...here.map((t) => t.ts))) / 1000));
-    box.replaceChildren(
-      el('span', 'spin', SPIN[spinIdx % SPIN.length]),
-      el('span', 'verb', ` ${names} 님이 ${verb}…`),
-      el('span', 'meta', ` (${secs}s · esc to interrupt)`)
-    );
+    const ag = here.find((t) => t.agent);
+    const people = here.filter((t) => !t.agent);
+    const rows = [];
+    if (ag) {
+      const secs = Math.max(1, Math.round((now - ag.start) / 1000));
+      rows.push([el('span', 'spin', SPIN[spinIdx % SPIN.length]), el('span', 'verb', ` ${ag.detail || '생각 중'}…`), el('span', 'meta', ` (${secs}s)`)]);
+    }
+    if (people.length) {
+      const verb = VERBS[Math.floor(people[0].start / 1000) % VERBS.length];
+      const secs = Math.max(1, Math.round((now - Math.min(...people.map((t) => t.start))) / 1000));
+      rows.push([el('span', 'spin dim', ag ? '·' : SPIN[spinIdx % SPIN.length]), el('span', ag ? 'meta' : 'verb', ` ${people.map((t) => t.nick).join(', ')} 님이 ${verb}…`), el('span', 'meta', ` (${secs}s)`)]);
+    }
+    box.replaceChildren(...rows.map((r) => { const d = el('div'); d.append(...r); return d; }));
     if (!spinTimer) spinTimer = setInterval(() => { spinIdx++; renderTyping(); }, 120);
   }
 
@@ -364,8 +455,21 @@
       }
       case '/me': return arg ? post({ type: 'action', text: arg }) : local('사용법: /me <행동>', 'error');
       case '/clear': return log.replaceChildren();
+      case '/cli': return openChannel(CLI_TAB);
+      case '/agent': return local('', 'local', agentHelp());
       default: return local(`알 수 없는 명령어: ${cmd}  (/help 참고)`, 'error');
     }
+  }
+
+  function agentHelp() {
+    const pre = el('div', 'tree-out');
+    [
+      '에이전트는 내 PC의 터미널 클라이언트에서, 내 claude 로그인/API 키로 실행됩니다.',
+      `터미널에서:  node cli.js ${location.host}`,
+      '접속 후 /cli 로 들어가 질문하면, 이 창에도 같은 내용이 함께 보입니다.',
+      '이 대화는 나만 볼 수 있고 방의 다른 사람에게는 전달되지 않습니다.',
+    ].forEach((l, i, a) => pre.append(i === a.length - 1 ? '└ ' : '├ ', l, '\n'));
+    return pre;
   }
 
   function shortcutsNode() {
@@ -434,7 +538,9 @@
     state.inputHistory.length = Math.min(state.inputHistory.length, 50);
     renderSuggest();
     if (text.startsWith('/')) return run(text.trim());
+    if (isCli()) return local('', 'local', agentHelp());
     post({ type: 'chat', text });
+    if (/(^|[^\w@])@claude\b/i.test(text)) local('', 'local', agentHelp());
   }
 
   form.addEventListener('submit', (e) => { e.preventDefault(); submit(); });
@@ -443,7 +549,7 @@
     state.suggestIdx = 0;
     renderSuggest();
     const v = input.value;
-    if (state.me && v.trim() && !v.startsWith('/') && Date.now() - state.lastTypingSent > 1500) {
+    if (state.me && !isCli() && v.trim() && !v.startsWith('/') && Date.now() - state.lastTypingSent > 1500) {
       state.lastTypingSent = Date.now();
       post({ type: 'typing' });
     }
