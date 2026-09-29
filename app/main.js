@@ -91,23 +91,31 @@ function openChat(baseUrl, nick) {
     if (new URL(target).origin !== url.origin) e.preventDefault();
   });
   chat.loadURL(url.toString());
-  chat.on('closed', async () => {
+  chat.on('closed', () => {
     chat = null;
-    await stopHosting();
+    // 런처를 먼저, 동기적으로 띄운다. 창이 0개가 되는 순간 window-all-closed 가
+    // app.quit() 을 실행하는데, stopHosting() 의 await 가 그 전에 이벤트 루프를
+    // 내주기 때문이다(방장은 소켓 종료를 기다리므로 항상 앱이 먼저 죽었다).
     createLauncher();
+    stopHosting();
   });
   if (launcher) launcher.close();
 }
 
-async function stopHosting() {
-  if (!hosting) return;
+// 서버가 완전히 닫히기 전에 다시 열면 포트가 겹치므로, 진행 중인 종료를 붙잡아 둔다.
+let stopping = null;
+
+function stopHosting() {
+  if (!hosting) return Promise.resolve();
   clearInterval(hosting.timer);
   hosting = null;
-  await server.stop();
+  stopping = server.stop().finally(() => { stopping = null; });
+  return stopping;
 }
 
 // ---------- IPC from launcher ----------
 ipcMain.handle('host', async (_e, { nick, port }) => {
+  if (stopping) await stopping; // 직전 방이 닫히는 중이면 기다린다
   const res = await server.start({ port: Number(port) || 3000, host: '0.0.0.0' });
   hosting = { port: res.port, name: `${nick}의 방`, timer: setInterval(sendBeacon, BEACON_MS) };
   sendBeacon();

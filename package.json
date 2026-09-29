@@ -1,7 +1,7 @@
 {
   "name": "lan-agent-chat",
   "productName": "LAN Chat",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "같은 네트워크(LAN)에서 쓰는 VS Code 스타일 채팅 — 일반 대화창과 개인 AI CLI 대화창 분리",
   "main": "app/main.js",
   "bin": {
@@ -14,7 +14,8 @@
     "dist": "electron-builder --dir",
     "dist:mac": "electron-builder --mac dmg",
     "dist:win": "electron-builder --win nsis",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:app": "electron test/electron-lifecycle.js"
   },
   "build": {
     "appId": "com.jihun.lanchat",

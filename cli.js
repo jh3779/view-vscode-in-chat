@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 터미널 채팅 클라이언트.
 // 같은 네트워크의 방에 참가해 터미널에서 대화하고, @claude 요청은 "내 PC"에서 "내 환경"
-// (claude 로그인 또는 ANTHROPIC_API_KEY)으로 실행해 결과를 방에 공유합니다.
+// (claude 로그인 또는 ANTHROPIC_API_KEY)으로 실행합니다. 결과는 나만 보는 CLI 대화창에만 남습니다.
 //
 //   node cli.js [주소] [--nick 이름] [--cwd 폴더] [--model 모델] [--tools Read,Grep,Glob] [--claude 경로]
 const readline = require('readline');
@@ -213,9 +213,7 @@ function renderMessage(m) {
   if (mine) {
     return m.text.split('\n').map((l, i) => MINE_BG(`${i === 0 ? '>' : ' '} ${l} `)).join('\n');
   }
-  const bullet = m.agent ? ORANGE('⏺') : hex(m.color)('⏺');
-  const tag = m.agent ? ` ${dim(`agent · via ${m.via}`)}` : '';
-  return `${bullet} ${bold(hex(m.color)(m.nick))}${tag} ${dim(time(m.ts))}\n${body(m.text)}`;
+  return `${hex(m.color)('⏺')} ${bold(hex(m.color)(m.nick))} ${dim(time(m.ts))}\n${body(m.text)}`;
 }
 
 function onMessage(m) {
@@ -251,7 +249,8 @@ function welcome() {
     `  cwd:   ${options.cwd.replace(os.homedir(), '~')}`,
     `  agent: ${claude ? `${auth} · ${options.tools === DEFAULT_TOOLS ? '읽기 전용' : options.tools}` : 'claude CLI 없음'}`,
   ]));
-  print(dim('  CLI 대화창은 이 기기에만 보입니다 — 방의 다른 사람은 내용도 존재도 볼 수 없습니다.'));
+  print(dim('  CLI 대화창은 나만 볼 수 있습니다 — 방의 다른 사람은 내용도 존재도 볼 수 없습니다.'));
+  print(dim(`  연결 키: ${state.key}   (브라우저/앱의 claude.cli 탭에서  /key ${state.key}  로 맞추면 함께 보입니다)`));
   print('');
 }
 
@@ -425,6 +424,7 @@ const COMMANDS = [
   ['/me <행동>', '행동 메시지'],
   ['/cli', '내 에이전트 창 열기 (나만 보임)'],
   ['/chat', '일반 대화창으로 돌아가기'],
+  ['/key', '이 터미널의 CLI 창 연결 키 보기'],
   ['/agent', '에이전트 상태 · cwd <폴더> · model <이름> · reset · stop'],
   ['/clear', '화면 지우기'],
   ['/quit', '나가기 (Ctrl+C 두 번)'],
@@ -456,6 +456,12 @@ async function command(line) {
       state.mode = 'chat';
       rl.setPrompt(promptText());
       return showChannel(state.channel);
+    case '/key':
+      return tree([
+        `연결 키        ${bold(state.key)}`,
+        `브라우저에 맞추기  /key ${state.key}`,
+        `이 키로 접속하기   node cli.js ${state.base.replace(/^https?:\/\//, '')} --key ${state.key}`,
+      ]);
     case '/channels':
       return tree(state.channels.map((c) => (c === state.channel ? bold(`#${c}`) + dim('  (현재)') : `#${c}`)));
     case '/who':
@@ -487,6 +493,7 @@ async function command(line) {
           `도구       ${options.tools}${options.tools === DEFAULT_TOOLS ? ' (읽기 전용)' : ''}`,
           `모델       ${options.model || '(기본값)'}`,
           `대화창     claude.cli (나만 보임, ${state.cli.length}건)`,
+          `연결 키    ${state.key}`,
           `상태       ${state.agent ? `실행 중 · 대기 ${state.agentQueue.length}건` : '대기 중'}`,
         ]);
       }

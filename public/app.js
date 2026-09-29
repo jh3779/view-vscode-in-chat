@@ -13,6 +13,7 @@
     ['/me', '<행동>  행동 메시지'],
     ['/clear', '화면 지우기 (내 화면만)'],
     ['/cli', '내 에이전트 창 보기 (나만 보임)'],
+    ['/key', '[값]  CLI 창 연결 키 보기/바꾸기'],
     ['/agent', '에이전트 사용법 (터미널 클라이언트에서 실행)'],
   ];
 
@@ -42,13 +43,13 @@
     cliTyping: null,
   };
 
-  // CLI 대화창 소유권 키. 이 브라우저에만 저장된다.
+  // CLI 대화창 소유권 키. 브라우저에서 만들지 않고 서버가 발급한 값을 저장만 한다.
+  // crypto.randomUUID() 는 보안 컨텍스트 전용이라 http://<LAN-IP> 에는 없고,
+  // 여기서 호출하면 앱 초기화 전체가 TypeError 로 중단된다(LAN 접속이 통째로 막힘).
   const CLI_TAB = 'claude.cli';
+  const KEY_RE = /^[A-Za-z0-9_-]{16,64}$/;
   state.key = safeGet('vschat.key') || '';
-  if (!/^[A-Za-z0-9_-]{16,64}$/.test(state.key)) {
-    state.key = crypto.randomUUID().replace(/-/g, '');
-    safeSet('vschat.key', state.key);
-  }
+  if (!KEY_RE.test(state.key)) state.key = '';
   const isCli = () => state.active === CLI_TAB;
 
   function safeGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -147,8 +148,13 @@
     box.append(t, el('div', 'gap'));
     box.append(el('div', 'd', '  이 창은 나만 볼 수 있습니다 — 방의 다른 사람은 내용도 존재도 보지 못합니다.'));
     box.append(el('div', 'gap'));
-    box.append(el('div', 'd', `  실행:  터미널에서  node cli.js ${location.host}`));
-    box.append(el('div', 'd', '  입력:  터미널에서 /cli 로 들어가 질문하면 여기에도 함께 보입니다'));
+    box.append(el('div', 'd', '  터미널을 이 창과 연결하려면 아래를 그대로 실행하세요.'));
+    box.append(el('div', 'gap'));
+    const cmd = el('div', 'd cmd', `  node cli.js ${location.host} --key ${state.key || '(연결 후 표시됩니다)'}`);
+    box.append(cmd);
+    box.append(el('div', 'gap'));
+    box.append(el('div', 'd', '  연결 후 터미널에서 /cli 로 들어가 질문하면 여기에도 함께 보입니다.'));
+    box.append(el('div', 'd', '  반대로 터미널 키를 쓰려면  /key <터미널에 표시된 키>'));
     wrap.append(box);
     return wrap;
   }
@@ -170,7 +176,7 @@
     [
       '1. 다른 기기에서 위 host 주소로 접속하면 함께 대화할 수 있습니다',
       '2. @닉네임 으로 멘션하고, ``` 로 코드 블록을 보낼 수 있습니다',
-      '3. 터미널 클라이언트(node cli.js)에서 @claude 로 본인 키를 써서 에이전트를 부를 수 있습니다',
+      '3. claude.cli 탭을 열면 내 에이전트 창을 볼 수 있습니다 (나만 보임)',
     ].forEach((x) => tips.append(el('div', null, ` ${x}`)));
     wrap.append(tips);
     return wrap;
@@ -456,6 +462,21 @@
       case '/me': return arg ? post({ type: 'action', text: arg }) : local('사용법: /me <행동>', 'error');
       case '/clear': return log.replaceChildren();
       case '/cli': return openChannel(CLI_TAB);
+      case '/key': {
+        if (!arg) {
+          const pre = el('div', 'tree-out');
+          [`현재 키   ${state.key || '(서버 발급 대기)'}`,
+           `터미널 연결  node cli.js ${location.host} --key ${state.key}`,
+           '바꾸려면  /key <값>  (터미널 키를 여기에 맞출 때)'].forEach((l, i, a) =>
+            pre.append(i === a.length - 1 ? '└ ' : '├ ', l, '\n'));
+          return local('', 'local', pre);
+        }
+        if (!KEY_RE.test(arg)) return local('키는 영숫자·_·- 16~64자여야 합니다.', 'error');
+        state.key = arg;
+        safeSet('vschat.key', arg);
+        local('키를 바꿨습니다. 다시 연결합니다…', 'system');
+        return connect();
+      }
       case '/agent': return local('', 'local', agentHelp());
       default: return local(`알 수 없는 명령어: ${cmd}  (/help 참고)`, 'error');
     }
@@ -465,8 +486,9 @@
     const pre = el('div', 'tree-out');
     [
       '에이전트는 내 PC의 터미널 클라이언트에서, 내 claude 로그인/API 키로 실행됩니다.',
-      `터미널에서:  node cli.js ${location.host}`,
-      '접속 후 /cli 로 들어가 질문하면, 이 창에도 같은 내용이 함께 보입니다.',
+      `연결:  node cli.js ${location.host} --key ${state.key || '(연결 대기 중)'}`,
+      '--key 를 빼면 터미널이 자기 키를 따로 만들어 이 창과 연결되지 않습니다.',
+      '연결 후 터미널에서 /cli 로 질문하면 이 창에도 함께 보입니다.',
       '이 대화는 나만 볼 수 있고 방의 다른 사람에게는 전달되지 않습니다.',
     ].forEach((l, i, a) => pre.append(i === a.length - 1 ? '└ ' : '├ ', l, '\n'));
     return pre;
