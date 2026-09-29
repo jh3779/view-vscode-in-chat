@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>chat</title>
+  <style>
+    :root { --bg: #1e1e1e; --fg: #cccccc; --dim: #858585; --bright: #e7e7e7; --accent: #d7875f; --sel: #b39ddb; --red: #f48771; --green: #4ec9b0;
+      --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, "D2Coding", monospace; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.6 var(--mono); user-select: none; }
+    .drag { height: 30px; -webkit-app-region: drag; }
+    main { padding: 4px 28px 20px; }
+    .welcome { border: 1px solid var(--accent); border-radius: 6px; padding: 10px 16px; margin-bottom: 18px; }
+    .welcome .star { color: var(--accent); }
+    .welcome .t { color: var(--bright); }
+    .welcome .d { color: var(--dim); white-space: pre; }
+    .q { color: var(--bright); margin: 14px 0 6px; }
+    .field { display: flex; align-items: center; gap: 8px; border: 1px solid #5a5a5a; border-radius: 6px; padding: 6px 12px; }
+    .field:focus-within { border-color: var(--dim); }
+    .field span { color: var(--bright); font-weight: 700; }
+    input { flex: 1; background: transparent; border: 0; outline: 0; color: var(--bright); font: inherit; user-select: text; }
+    input::placeholder { color: #6a6a6a; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li { padding: 1px 0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    li .ptr { display: inline-block; width: 2ch; }
+    li .sub { color: var(--dim); }
+    li.sel { color: var(--sel); }
+    li.sel .sub { color: #8a7bb0; }
+    li.searching { color: var(--dim); cursor: default; }
+    .spin { color: var(--accent); }
+    #manual { margin: 6px 0 0 2ch; display: none; }
+    #manual.show { display: flex; }
+    .foot { color: var(--dim); margin-top: 14px; font-size: 11px; }
+    .err { color: var(--red); margin-top: 8px; min-height: 1.6em; white-space: pre-wrap; }
+    .ok { color: var(--green); }
+  </style>
+</head>
+<body>
+  <div class="drag"></div>
+  <main>
+    <div class="welcome">
+      <div class="t"><span class="star">✻</span> Welcome to <b>LAN chat</b>!</div>
+      <div class="d" id="where"></div>
+    </div>
+
+    <div class="q">닉네임</div>
+    <div class="field"><span>&gt;</span><input id="nick" maxlength="20" placeholder="사용할 이름" autofocus /></div>
+
+    <div class="q">무엇을 할까요?</div>
+    <ul id="menu"></ul>
+    <div class="field" id="manual"><span>&gt;</span><input id="addr" placeholder="172.30.1.86:3000" /></div>
+
+    <div class="err" id="err"></div>
+    <div class="foot">↑↓ 이동 · Enter 선택 · 숫자키 바로 선택</div>
+  </main>
+  <script src="launcher.js"></script>
+</body>
+</html>

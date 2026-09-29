@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>chat</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="window">
+    <header class="titlebar">
+      <div class="traffic"><span></span><span></span><span></span></div>
+      <div class="menu">
+        <span>File</span><span>Edit</span><span>Selection</span><span>View</span><span>Go</span><span>Terminal</span><span>Help</span>
+      </div>
+      <div class="title" id="title"></div>
+    </header>
+
+    <div class="workbench">
+      <nav class="activitybar">
+        <button class="act active" data-panel="explorer" title="Explorer">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+        </button>
+        <button class="act" data-panel="users" title="Online">
+          <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M1 21v-1a7 7 0 0 1 14 0v1"/><path d="M16 4a4 4 0 0 1 0 8M23 21v-1a7 7 0 0 0-5-6.7"/></svg>
+        </button>
+        <div class="spacer"></div>
+        <button class="act" id="settingsBtn" title="닉네임 변경">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+      </nav>
+
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-title">EXPLORER</div>
+        <section class="tree">
+          <div class="tree-head">▾ CHANNELS <button id="newChannel" title="새 채널">+</button></div>
+          <ul id="channelList"></ul>
+        </section>
+        <section class="tree">
+          <div class="tree-head">▾ ONLINE <span class="badge" id="userCount">0</span></div>
+          <ul id="userList"></ul>
+        </section>
+      </aside>
+
+      <main class="editor">
+        <div class="tabs" id="tabs"></div>
+        <div class="breadcrumbs" id="breadcrumbs">chat › general.chat</div>
+        <div class="terminal" id="log" aria-live="polite"></div>
+        <div class="typing" id="typing" hidden></div>
+        <form class="prompt" id="form" autocomplete="off">
+          <div class="prompt-box">
+            <span class="caret" id="caret">&gt;</span>
+            <textarea id="input" rows="1" spellcheck="false" placeholder="메시지를 입력하세요  (/help 로 명령어 보기)"></textarea>
+          </div>
+          <div class="prompt-hint" id="hint"></div>
+        </form>
+      </main>
+    </div>
+
+    <footer class="statusbar">
+      <span class="sb-item sb-remote" id="sbConn">● 연결 중…</span>
+      <span class="sb-item">⎇ main</span>
+      <span class="sb-item" id="sbNick"></span>
+      <span class="sb-grow"></span>
+      <span class="sb-item" id="sbAddr"></span>
+      <span class="sb-item" id="sbChannel">#general</span>
+      <span class="sb-item" id="sbUsers">0 online</span>
+      <span class="sb-item">UTF-8</span>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
