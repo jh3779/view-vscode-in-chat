@@ -2,5 +2,10 @@ node_modules/
 dist/
 .DS_Store
 .claude/settings.local.json
-build/*.icns
-build/*.ico
+
+# 전역 ~/.gitignore 의 build/ 규칙 때문에 앱 아이콘까지 빠진다.
+# 디렉터리를 먼저 되살린 뒤, 빌드 산출물만 다시 제외한다.
+!build/
+build/*
+!build/icon.png
+!build/icon.svg
