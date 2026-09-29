@@ -166,3 +166,8 @@ body.in-app .titlebar { -webkit-app-region: drag; }
 body.in-app .titlebar .menu { display: none; }
 body.in-app.mac .traffic { visibility: hidden; width: 78px; }
 body.in-app.other .traffic { display: none; }
+
+/* CLI 대화창 — 나만 보이는 개인 에이전트 창 */
+.tab.cli.active { border-top-color: var(--prompt); }
+.tab.cli .ico { color: var(--prompt); }
+.tree li.agent .ico.star { color: var(--prompt); }

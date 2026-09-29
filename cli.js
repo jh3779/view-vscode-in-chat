@@ -31,12 +31,20 @@ const CONFIG_FILE = process.env.LAN_CHAT_CONFIG || path.join(os.homedir(), '.lan
 const config = (() => { try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; } })();
 const options = {
   nick: opt('nick'),
+  key: opt('key'),
   cwd: path.resolve(opt('cwd') || process.cwd()),
   model: opt('model') || '',
   tools: opt('tools') || DEFAULT_TOOLS,
   claude: opt('claude'),
   address: argv.find((a) => !a.startsWith('-')) || null,
 };
+// CLI 대화창 소유권 키. 이 기기에만 저장되며, 이 값을 아는 연결만 내 CLI 창을 본다.
+function ensureKey() {
+  const k = options.key || config.key;
+  if (/^[A-Za-z0-9_-]{16,64}$/.test(String(k || ''))) return String(k);
+  return require('crypto').randomUUID().replace(/-/g, '');
+}
+
 const saveConfig = (patch) => {
   Object.assign(config, patch);
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch {}
@@ -126,6 +134,9 @@ const state = {
   me: null,
   nick: options.nick || config.nick || '',
   channel: 'general',
+  mode: 'chat', // 'chat' = 일반 대화창, 'cli' = 내 CLI 대화창(남에게 안 보임)
+  key: '',
+  cli: [], // 내 CLI 대화창 기록
   channels: [],
   history: {},
   users: [],
@@ -134,8 +145,7 @@ const state = {
   connected: false,
   agent: null, // { run, start, detail, channel }
   agentQueue: [],
-  sessions: new Map(),
-  lastContext: new Map(),
+  session: null, // CLI 대화창은 하나이므로 세션도 하나
   lastTypingSent: 0,
   lastAgentTyping: 0,
   quitting: false,
@@ -176,6 +186,19 @@ setInterval(() => {
 
 // ---------- message rendering ----------
 function renderMessage(m) {
+  if (m.type === 'agent-log') {
+    const [call, ...rest] = String(m.text).split('\n');
+    const p = call.indexOf('(');
+    const lines = [`${ORANGE('⏺')} ${p > 0 ? bold(call.slice(0, p)) + call.slice(p) : bold(call)}`];
+    for (const r of rest) lines.push(dim(`  ${r}`));
+    return lines.join('\n');
+  }
+  if (m.type === 'agent') {
+    return `${ORANGE('⏺')} ${bold(ORANGE('claude'))} ${dim(time(m.ts))}\n${body(m.text)}`;
+  }
+  if (m.type === 'cli') {
+    return m.text.split('\n').map((l, i) => MINE_BG(`${i === 0 ? '>' : ' '} ${l} `)).join('\n');
+  }
   if (m.type === 'system') {
     const [call, ...rest] = String(m.text).split('\n');
     const p = call.indexOf('(');
@@ -207,6 +230,14 @@ function onMessage(m) {
   }
 }
 
+// CLI 대화창 메시지. 서버가 같은 키를 가진 내 연결에만 보낸 것이다.
+function onCliMessage(m) {
+  state.cli.push(m);
+  if (state.cli.length > 200) state.cli.shift();
+  if (state.mode === 'cli') print(renderMessage(m));
+  else if (m.type === 'agent') print(dim(`  ↳ claude.cli · ${m.text.replace(/\s+/g, ' ').slice(0, 60)}`));
+}
+
 function welcome() {
   const host = state.base.replace(/^https?:\/\//, '');
   const claude = findClaude(options.claude);
@@ -214,13 +245,21 @@ function welcome() {
   print(box([
     `${ORANGE('✻')} Welcome to ${bold(`#${state.channel}`)}!`,
     '',
-    dim('  /help 로 명령어 보기, @claude 로 에이전트 호출'),
+    dim('  /help 로 명령어 보기, /cli 로 내 에이전트 창 열기'),
     '',
     `  host:  ${host}`,
     `  cwd:   ${options.cwd.replace(os.homedir(), '~')}`,
     `  agent: ${claude ? `${auth} · ${options.tools === DEFAULT_TOOLS ? '읽기 전용' : options.tools}` : 'claude CLI 없음'}`,
   ]));
+  print(dim('  CLI 대화창은 이 기기에만 보입니다 — 방의 다른 사람은 내용도 존재도 볼 수 없습니다.'));
   print('');
+}
+
+function showCli(count = 30) {
+  const w = Math.max(0, Math.min(60, (out$.columns || 80) - 16));
+  print(ORANGE(`── claude.cli ${'─'.repeat(w)}`) + dim('  (나만 보임)'));
+  if (!state.cli.length) print(dim('  아직 대화가 없습니다. 바로 질문을 입력하세요.'));
+  for (const m of state.cli.slice(-count)) print(renderMessage(m));
 }
 
 function showChannel(ch, count = 30) {
@@ -255,7 +294,7 @@ async function connect() {
   while (!state.quitting) {
     state.controller = new AbortController();
     try {
-      const url = `${state.base}/events?client=cli&nick=${encodeURIComponent(state.nick)}`;
+      const url = `${state.base}/events?client=cli&key=${encodeURIComponent(state.key)}&nick=${encodeURIComponent(state.nick)}`;
       const res = await fetch(url, { signal: state.controller.signal, headers: { Accept: 'text/event-stream' } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const reader = res.body.getReader();
@@ -300,6 +339,8 @@ function handleEvent(event, d, first) {
     state.channels = d.channels;
     state.users = d.users;
     state.connected = true;
+    state.cli = d.cli || [];
+    if (d.key && d.key !== state.key) { state.key = d.key; saveConfig({ key: d.key }); }
     if (first) {
       state.history = d.history;
       welcome();
@@ -310,19 +351,17 @@ function handleEvent(event, d, first) {
       for (const m of Object.values(d.history).flat().filter((x) => x.ts > state.lastTs).sort((a, b) => a.ts - b.ts)) onMessage(m);
     }
   } else if (event === 'message') onMessage(d);
+  else if (event === 'cli-message') onCliMessage(d);
   else if (event === 'users') state.users = d;
   else if (event === 'channels') state.channels = d;
 }
 
 // ---------- agent (내 PC, 내 키) ----------
+// CLI 대화창은 나 혼자만 쓰므로 맥락도 내 입력뿐이다.
+// 방의 다른 사람이 쓴 글은 프롬프트에 들어가지 않는다(감사 지적 4번 — 주입 경계 제거).
+// 이전 턴은 --resume 세션이 이미 기억하므로 여기서 다시 붙이지 않는다.
 function buildPrompt(job) {
-  const since = state.lastContext.get(job.channel) || 0;
-  const context = (state.history[job.channel] || [])
-    .filter((m) => m.type === 'chat' && !m.agent && m.ts > since && m.ts < job.ts)
-    .slice(-12)
-    .map((m) => `${m.nick}: ${m.text}`);
-  state.lastContext.set(job.channel, job.ts);
-  return `${context.length ? `[#${job.channel} 최근 대화]\n${context.join('\n')}\n\n` : ''}[${state.nick} 님의 요청]\n${job.text}`;
+  return job.text;
 }
 
 function startAgent(job) {
@@ -331,9 +370,9 @@ function startAgent(job) {
     print(RED('✗ claude CLI를 찾지 못했습니다. 설치 후 다시 시도하거나 --claude <경로> 로 지정하세요'));
     return;
   }
-  const a = { start: Date.now(), detail: '생각 중', channel: job.channel };
+  const a = { start: Date.now(), detail: '생각 중' };
   state.agent = a;
-  const send = (payload) => post({ ...payload, channel: job.channel });
+  const send = (payload) => post(payload);
   const typing = (force) => {
     if (!force && Date.now() - state.lastAgentTyping < 1000) return;
     state.lastAgentTyping = Date.now();
@@ -348,14 +387,14 @@ function startAgent(job) {
     cwd: options.cwd,
     model: options.model,
     tools: options.tools,
-    session: state.sessions.get(job.channel),
+    session: state.session,
     onEvent(ev) {
-      if (ev.kind === 'session') state.sessions.set(job.channel, ev.id);
+      if (ev.kind === 'session') state.session = ev.id;
       else if (ev.kind === 'detail') { a.detail = ev.text; typing(); }
       else if (ev.kind === 'text') send({ type: 'agent-text', text: ev.text });
       else if (ev.kind === 'tool') send({ type: 'agent-log', text: `${ev.call}\n⎿  ${ev.result}` });
       else if (ev.kind === 'done') {
-        send({ type: 'agent-log', text: `Done(${ev.secs.toFixed(1)}s)\n⎿  ${state.nick} 님의 요청을 처리했습니다` });
+        send({ type: 'agent-log', text: `Done(${ev.secs.toFixed(1)}s)\n⎿  완료` });
         if (ev.cost != null) a.cost = ev.cost;
       } else if (ev.kind === 'error') {
         send({ type: 'agent-log', text: `${ev.interrupted ? 'Interrupted' : 'Error'}\n⎿  ${ev.message}` });
@@ -384,6 +423,8 @@ const COMMANDS = [
   ['/who', '접속자 목록'],
   ['/nick <이름>', '닉네임 변경'],
   ['/me <행동>', '행동 메시지'],
+  ['/cli', '내 에이전트 창 열기 (나만 보임)'],
+  ['/chat', '일반 대화창으로 돌아가기'],
   ['/agent', '에이전트 상태 · cwd <폴더> · model <이름> · reset · stop'],
   ['/clear', '화면 지우기'],
   ['/quit', '나가기 (Ctrl+C 두 번)'],
@@ -394,7 +435,7 @@ async function command(line) {
   const arg = rest.join(' ').trim();
   switch (cmd) {
     case '/help':
-      return tree([...COMMANDS.map(([c, d]) => `${bold(c.padEnd(14))} ${d}`), `${bold('@claude <질문>'.padEnd(14))} 내 PC·내 키로 에이전트 실행, 결과는 방에 공유`]);
+      return tree(COMMANDS.map(([c, d]) => `${bold(c.padEnd(14))} ${d}`));
     case '/join': {
       const ch = arg.replace(/^#/, '').toLowerCase().replace(/[^a-z0-9가-힣_-]/g, '').slice(0, 24);
       if (!ch) return print(RED('✗ 사용법: /join <채널>'));
@@ -403,9 +444,18 @@ async function command(line) {
       const d = await post({ type: 'join' });
       if (!d) { state.channel = prev; return; }
       state.history[ch] ||= [];
+      state.mode = 'chat';
       rl.setPrompt(promptText());
       return showChannel(ch);
     }
+    case '/cli':
+      state.mode = 'cli';
+      rl.setPrompt(promptText());
+      return showCli();
+    case '/chat':
+      state.mode = 'chat';
+      rl.setPrompt(promptText());
+      return showChannel(state.channel);
     case '/channels':
       return tree(state.channels.map((c) => (c === state.channel ? bold(`#${c}`) + dim('  (현재)') : `#${c}`)));
     case '/who':
@@ -436,6 +486,7 @@ async function command(line) {
           `작업 폴더  ${options.cwd}`,
           `도구       ${options.tools}${options.tools === DEFAULT_TOOLS ? ' (읽기 전용)' : ''}`,
           `모델       ${options.model || '(기본값)'}`,
+          `대화창     claude.cli (나만 보임, ${state.cli.length}건)`,
           `상태       ${state.agent ? `실행 중 · 대기 ${state.agentQueue.length}건` : '대기 중'}`,
         ]);
       }
@@ -444,7 +495,7 @@ async function command(line) {
         const dir = path.resolve(val.replace(/^~/, os.homedir()));
         if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return print(RED(`✗ 폴더가 없습니다: ${dir}`));
         options.cwd = dir;
-        state.sessions.clear();
+        state.session = null;
         return print(dim(`  ⎿  작업 폴더: ${dir}`));
       }
       if (sub === 'model') {
@@ -452,8 +503,7 @@ async function command(line) {
         return print(dim(`  ⎿  모델: ${options.model || '(기본값)'}`));
       }
       if (sub === 'reset') {
-        state.sessions.clear();
-        state.lastContext.clear();
+        state.session = null;
         return print(dim('  ⎿  에이전트 대화 기억을 초기화했습니다'));
       }
       if (sub === 'stop') return state.agent ? state.agent.run.stop() : print(dim('  ⎿  실행 중인 작업이 없습니다'));
@@ -474,18 +524,24 @@ async function onLine(raw) {
     drawFooter();
     return command(text.trim());
   }
-  const ok = await post({ type: 'chat', text });
-  if (!ok) return;
-  if (/(^|[^\w@])@claude\b/i.test(text)) {
-    const job = { channel: state.channel, text, ts: Date.now() };
+  // CLI 대화창: 입력 전부가 내 에이전트에게 간다. 방에는 아무것도 나가지 않는다.
+  if (state.mode === 'cli') {
+    if (!(await post({ type: 'cli', text }))) return;
+    const job = { text, ts: Date.now() };
     if (state.agent) {
       state.agentQueue.push(job);
       print(dim(`  ⎿  대기열에 추가했습니다 (${state.agentQueue.length})`));
     } else startAgent(job);
+    return;
   }
+  // 일반 대화창: 사람에게만 간다. 에이전트는 여기서 돌지 않는다.
+  if (!(await post({ type: 'chat', text }))) return;
+  if (/(^|[^\w@])@claude\b/i.test(text)) print(dim('  ⎿  에이전트는 /cli 창에서 대화합니다 (일반 대화창과 분리)'));
 }
 
-const promptText = () => `${dim(`#${state.channel}`)} ${bold('>')} `;
+const promptText = () => (state.mode === 'cli'
+  ? `${ORANGE('claude.cli')} ${bold('>')} `
+  : `${dim(`#${state.channel}`)} ${bold('>')} `);
 
 function quit() {
   state.quitting = true;
@@ -539,7 +595,8 @@ async function main() {
 
   if (!state.nick) state.nick = (await ask(`${bold('>')} 닉네임: `)).replace(/\s+/g, '').slice(0, 20);
   if (!state.nick) process.exit(1);
-  saveConfig({ nick: state.nick });
+  state.key = ensureKey();
+  saveConfig({ nick: state.nick, key: state.key });
 
   rl.setPrompt(promptText());
   rl.on('line', onLine);

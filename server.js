@@ -27,6 +27,7 @@ const BUCKETS = {
 const POLICY = {
   chat: { bucket: 'say', maxText: MAX_TEXT },
   action: { bucket: 'say', maxText: MAX_TEXT },
+  cli: { bucket: 'say', maxText: MAX_TEXT },
   nick: { bucket: 'say' },
   join: { bucket: 'say' },
   typing: { bucket: 'hint', quiet: true },
@@ -58,9 +59,11 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-// channel -> message[]
+// channel -> message[]   (일반 대화창 — 방 전체 공유)
 const history = new Map(DEFAULT_CHANNELS.map((c) => [c, []]));
-// clientId -> { id, nick, color, res, kind, buckets }
+// key -> message[]       (CLI 대화창 — 소유자에게만 전송, 방 히스토리와 절대 섞이지 않는다)
+const cliHistory = new Map();
+// clientId -> { id, nick, color, res, kind, key, buckets }
 const clients = new Map();
 
 const COLORS = ['#4fc1ff', '#c586c0', '#dcdcaa', '#4ec9b0', '#ce9178', '#b5cea8', '#d7ba7d', '#9cdcfe', '#f48771'];
@@ -81,12 +84,31 @@ function sanitizeChannel(ch) {
   return String(ch || '').toLowerCase().replace(/[^a-z0-9가-힣_-]/g, '').slice(0, 24);
 }
 
+// CLI 대화창 소유권 키. 기기에 저장된 값을 그대로 쓰되, 형식이 맞지 않으면 새로 발급한다.
+function sanitizeKey(k) {
+  return /^[A-Za-z0-9_-]{16,64}$/.test(String(k || '')) ? String(k) : null;
+}
+
 function send(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
 function broadcast(event, data) {
   for (const c of clients.values()) send(c.res, event, data);
+}
+
+// CLI 대화창 전용 전송. 같은 키를 가진 연결(본인의 터미널·브라우저)에만 보낸다.
+// 다른 참가자는 SSE에 직접 붙어도 이 이벤트를 받지 못한다.
+function sendToOwner(key, event, data) {
+  for (const c of clients.values()) if (c.key === key) send(c.res, event, data);
+}
+
+function pushCli(key, msg) {
+  const list = cliHistory.get(key) || [];
+  list.push(msg);
+  if (list.length > HISTORY_LIMIT) list.shift();
+  cliHistory.set(key, list);
+  sendToOwner(key, 'cli-message', msg);
 }
 
 function userList() {
@@ -164,15 +186,18 @@ function handleEvents(req, res, url) {
   res.write('retry: 2000\n\n');
 
   const kind = url.searchParams.get('client') === 'cli' ? 'cli' : 'web';
-  const client = { id, nick, color, res, kind, buckets: {} };
+  const key = sanitizeKey(url.searchParams.get('key')) || crypto.randomUUID().replace(/-/g, '');
+  const client = { id, nick, color, res, kind, key, buckets: {} };
   clients.set(id, client);
 
   send(res, 'welcome', {
     id,
     nick,
     color,
+    key, // 클라이언트가 없거나 형식이 틀렸으면 새로 발급된 값 — 기기에 저장해 두면 다음에도 같은 CLI 대화창을 연다
     channels: channelList(),
     history: Object.fromEntries(history),
+    cli: cliHistory.get(key) || [], // 내 CLI 대화창만. 남의 것은 이 응답에 들어가지 않는다
     users: userList(),
     addresses: lanAddresses().map((a) => `http://${a}:${PORT}`),
   });
@@ -216,8 +241,17 @@ async function handleSend(req, res) {
     broadcast('typing', { userId: client.id, nick: client.nick, color: client.color, channel, ts: now });
     return json(res, 200, { ok: true });
   }
-  // 에이전트 출력 중계: 에이전트는 요청한 사람의 PC에서 그 사람의 키로 실행되고, 결과만 방에 공유됩니다.
-  if (type.startsWith('agent-')) return relayAgent(res, client, body, type, channel, text, now);
+  // CLI 대화창: 일반 대화창과 완전히 분리된 개인 창. 소유자에게만 전송·저장된다.
+  if (type === 'cli') {
+    if (!text.trim()) return json(res, 400, { error: 'empty' });
+    pushCli(client.key, {
+      id: crypto.randomUUID(), type: 'cli', ts: now,
+      userId: client.id, nick: client.nick, color: client.color, text,
+    });
+    return json(res, 200, { ok: true });
+  }
+  // 에이전트 출력 중계: 요청한 사람의 PC에서 그 사람의 키로 실행된 결과를 본인 CLI 창에만 되돌려준다.
+  if (type.startsWith('agent-')) return relayAgent(res, client, body, type, text, now);
 
   if (type === 'nick') {
     const nick = sanitizeNick(body.nick);
@@ -254,17 +288,18 @@ async function handleSend(req, res) {
   json(res, 200, { ok: true });
 }
 
-function relayAgent(res, client, body, type, channel, text, now) {
-  const base = { userId: `agent:${client.id}`, nick: AGENT.nick, color: AGENT.color, agent: true, via: client.nick };
+function relayAgent(res, client, body, type, text, now) {
+  const base = { userId: `agent:${client.key}`, nick: AGENT.nick, color: AGENT.color, agent: true };
+  // 어느 가지도 broadcast를 쓰지 않는다 — 에이전트 출력이 방으로 새는 경로를 두지 않기 위해.
   if (type === 'agent-typing') {
-    broadcast('typing', { ...base, channel, detail: String(body.detail || '생각 중').slice(0, 120), since: Number(body.since) || now, ts: now });
+    sendToOwner(client.key, 'cli-typing', { ...base, detail: String(body.detail || '생각 중').slice(0, 120), since: Number(body.since) || now, ts: now });
   } else if (type === 'agent-idle') {
-    broadcast('typing-end', { userId: base.userId, channel });
+    sendToOwner(client.key, 'cli-typing-end', { userId: base.userId });
   } else if (type === 'agent-text') {
     if (!text.trim()) return json(res, 400, { error: 'empty' });
-    pushMessage(channel, { id: crypto.randomUUID(), type: 'chat', channel, ts: now, text, ...base });
+    pushCli(client.key, { id: crypto.randomUUID(), type: 'agent', ts: now, text, ...base });
   } else {
-    pushMessage(channel, { id: crypto.randomUUID(), type: 'system', channel, ts: now, text, agent: true, via: client.nick });
+    pushCli(client.key, { id: crypto.randomUUID(), type: 'agent-log', ts: now, text, ...base });
   }
   json(res, 200, { ok: true });
 }
