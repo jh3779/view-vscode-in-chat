@@ -1,0 +1,38 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.x', '22.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 런타임 의존성이 없으므로 설치 단계 없이 바로 검사한다.
+      - name: 구문 검사
+        run: |
+          for f in server.js agent.js cli.js app/*.js public/app.js test/*.js; do
+            node --check "$f"
+          done
+
+      - name: 테스트
+        run: node --test "test/*.test.js"

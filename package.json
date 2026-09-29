@@ -13,7 +13,8 @@
     "cli": "node cli.js",
     "dist": "electron-builder --dir",
     "dist:mac": "electron-builder --mac dmg",
-    "dist:win": "electron-builder --win nsis"
+    "dist:win": "electron-builder --win nsis",
+    "test": "node --test \"test/*.test.js\""
   },
   "build": {
     "appId": "com.jihun.lanchat",
