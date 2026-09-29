@@ -11,8 +11,44 @@ const HISTORY_LIMIT = 200;
 const MAX_TEXT = 2000;
 const MAX_NICK = 20;
 const MAX_AGENT_TEXT = 8000;
+const MAX_LOG_TEXT = 500;
 const AGENT = { nick: 'claude', color: '#d7875f' };
 const DEFAULT_CHANNELS = ['general', 'random', 'dev'];
+
+// ---------- 전송 정책 ----------
+// 종류별 토큰 버킷. handleSend 입구에서 단 한 번 적용하므로 특정 타입만 빠져나가는 경로가 없다.
+// POLICY에 없는 타입은 거부되므로, 새 타입을 추가하면서 제한을 빠뜨릴 수 없다.
+const BUCKETS = {
+  say: { capacity: 6, refillMs: 300 }, // 사람이 직접 보내는 메시지
+  hint: { capacity: 2, refillMs: 1000 }, // 저장되지 않는 일시 신호
+  agent: { capacity: 30, refillMs: 200 }, // 에이전트 출력 — 도구 로그가 연달아 온다
+};
+
+const POLICY = {
+  chat: { bucket: 'say', maxText: MAX_TEXT },
+  action: { bucket: 'say', maxText: MAX_TEXT },
+  nick: { bucket: 'say' },
+  join: { bucket: 'say' },
+  typing: { bucket: 'hint', quiet: true },
+  'agent-typing': { bucket: 'hint', quiet: true },
+  'agent-idle': { bucket: 'hint', quiet: true },
+  'agent-text': { bucket: 'agent', maxText: MAX_AGENT_TEXT },
+  'agent-log': { bucket: 'agent', maxText: MAX_LOG_TEXT },
+};
+
+// 1000자마다 토큰을 하나 더 쓴다 — 긴 메시지가 짧은 메시지와 같은 값이 되지 않도록.
+const costOf = (text) => 1 + Math.floor(text.length / 1000);
+
+function take(client, name, amount) {
+  const spec = BUCKETS[name];
+  const now = Date.now();
+  const b = (client.buckets[name] ||= { tokens: spec.capacity, ts: now });
+  b.tokens = Math.min(spec.capacity, b.tokens + (now - b.ts) / spec.refillMs);
+  b.ts = now;
+  if (b.tokens < amount) return false;
+  b.tokens -= amount;
+  return true;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -24,7 +60,7 @@ const MIME = {
 
 // channel -> message[]
 const history = new Map(DEFAULT_CHANNELS.map((c) => [c, []]));
-// clientId -> { id, nick, color, res, lastSent, lastTyping, kind }
+// clientId -> { id, nick, color, res, kind, buckets }
 const clients = new Map();
 
 const COLORS = ['#4fc1ff', '#c586c0', '#dcdcaa', '#4ec9b0', '#ce9178', '#b5cea8', '#d7ba7d', '#9cdcfe', '#f48771'];
@@ -76,15 +112,24 @@ function system(channel, text, extra = {}) {
   pushMessage(channel, { id: crypto.randomUUID(), type: 'system', channel, text, ts: Date.now(), ...extra });
 }
 
+// POLICY가 허용하는 가장 긴 본문(agent-text 8000자)을 UTF-8 최악(문자당 3바이트)으로
+// 담고도 남는 크기. 이 값이 작으면 정책상 허용된 메시지가 전송 계층에서 먼저 잘린다.
+const MAX_BODY = 32 * 1024;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let over = false;
     const chunks = [];
     req.on('data', (chunk) => {
+      if (over) return; // 남은 본문은 버리되 소켓은 살려 둔다 — 응답을 보내야 하므로
       size += chunk.length;
-      if (size > 16 * 1024) {
-        reject(new Error('payload too large'));
-        req.destroy();
+      if (size > MAX_BODY) {
+        over = true;
+        chunks.length = 0;
+        const err = new Error('본문이 너무 큽니다.');
+        err.status = 413;
+        reject(err);
         return;
       }
       chunks.push(chunk);
@@ -119,7 +164,7 @@ function handleEvents(req, res, url) {
   res.write('retry: 2000\n\n');
 
   const kind = url.searchParams.get('client') === 'cli' ? 'cli' : 'web';
-  const client = { id, nick, color, res, lastSent: 0, kind };
+  const client = { id, nick, color, res, kind, buckets: {} };
   clients.set(id, client);
 
   send(res, 'welcome', {
@@ -148,29 +193,33 @@ async function handleSend(req, res) {
   try {
     body = await readBody(req);
   } catch (e) {
-    return json(res, 400, { error: e.message });
+    return json(res, e.status || 400, { error: e.message });
   }
   const client = clients.get(body.id);
   if (!client) return json(res, 401, { error: 'unknown client' });
 
+  const type = body.type || 'chat';
+  const rule = POLICY[type];
+  if (!rule) return json(res, 400, { error: `알 수 없는 요청 종류: ${type}` });
+
+  const text = rule.maxText ? String(body.text || '').slice(0, rule.maxText) : '';
+  if (!take(client, rule.bucket, costOf(text))) {
+    // 일시 신호는 놓쳐도 곧 다음 신호가 오므로 조용히 버린다.
+    if (rule.quiet) return json(res, 200, { ok: true, dropped: true });
+    return json(res, 429, { error: '너무 빠르게 보내고 있습니다.' });
+  }
+
   const now = Date.now();
-  if (body.type === 'typing') {
-    if (now - (client.lastTyping || 0) > 1000) {
-      client.lastTyping = now;
-      const channel = sanitizeChannel(body.channel) || 'general';
-      broadcast('typing', { userId: client.id, nick: client.nick, color: client.color, channel, ts: now });
-    }
+  const channel = sanitizeChannel(body.channel) || 'general';
+
+  if (type === 'typing') {
+    broadcast('typing', { userId: client.id, nick: client.nick, color: client.color, channel, ts: now });
     return json(res, 200, { ok: true });
   }
   // 에이전트 출력 중계: 에이전트는 요청한 사람의 PC에서 그 사람의 키로 실행되고, 결과만 방에 공유됩니다.
-  if (body.type && body.type.startsWith('agent-')) return relayAgent(res, client, body, now);
+  if (type.startsWith('agent-')) return relayAgent(res, client, body, type, channel, text, now);
 
-  if (now - client.lastSent < 150) return json(res, 429, { error: '너무 빠르게 보내고 있습니다.' });
-  client.lastSent = now;
-
-  const channel = sanitizeChannel(body.channel) || 'general';
-
-  if (body.type === 'nick') {
+  if (type === 'nick') {
     const nick = sanitizeNick(body.nick);
     if (!nick) return json(res, 400, { error: '사용할 수 없는 닉네임입니다.' });
     const old = client.nick;
@@ -180,7 +229,7 @@ async function handleSend(req, res) {
     return json(res, 200, { ok: true, nick });
   }
 
-  if (body.type === 'join') {
+  if (type === 'join') {
     if (!history.has(channel)) {
       history.set(channel, []);
       broadcast('channels', channelList());
@@ -189,12 +238,11 @@ async function handleSend(req, res) {
     return json(res, 200, { ok: true, channel });
   }
 
-  const text = String(body.text || '').slice(0, MAX_TEXT);
   if (!text.trim()) return json(res, 400, { error: 'empty' });
 
   const msg = {
     id: crypto.randomUUID(),
-    type: body.type === 'action' ? 'action' : 'chat',
+    type,
     channel,
     userId: client.id,
     nick: client.nick,
@@ -206,22 +254,17 @@ async function handleSend(req, res) {
   json(res, 200, { ok: true });
 }
 
-function relayAgent(res, client, body, now) {
-  const channel = sanitizeChannel(body.channel) || 'general';
+function relayAgent(res, client, body, type, channel, text, now) {
   const base = { userId: `agent:${client.id}`, nick: AGENT.nick, color: AGENT.color, agent: true, via: client.nick };
-  if (body.type === 'agent-typing') {
+  if (type === 'agent-typing') {
     broadcast('typing', { ...base, channel, detail: String(body.detail || '생각 중').slice(0, 120), since: Number(body.since) || now, ts: now });
-  } else if (body.type === 'agent-idle') {
+  } else if (type === 'agent-idle') {
     broadcast('typing-end', { userId: base.userId, channel });
-  } else if (body.type === 'agent-text') {
-    const text = String(body.text || '').slice(0, MAX_AGENT_TEXT);
+  } else if (type === 'agent-text') {
     if (!text.trim()) return json(res, 400, { error: 'empty' });
     pushMessage(channel, { id: crypto.randomUUID(), type: 'chat', channel, ts: now, text, ...base });
-  } else if (body.type === 'agent-log') {
-    const text = String(body.text || '').slice(0, 500);
-    pushMessage(channel, { id: crypto.randomUUID(), type: 'system', channel, ts: now, text, agent: true, via: client.nick });
   } else {
-    return json(res, 400, { error: 'unknown agent event' });
+    pushMessage(channel, { id: crypto.randomUUID(), type: 'system', channel, ts: now, text, agent: true, via: client.nick });
   }
   json(res, 200, { ok: true });
 }
