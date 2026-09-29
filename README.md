@@ -1,5 +1,8 @@
 # LAN Chat
 
+[![test](https://github.com/jh3779/view-vscode-in-chat/actions/workflows/test.yml/badge.svg)](https://github.com/jh3779/view-vscode-in-chat/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/jh3779/view-vscode-in-chat)](https://github.com/jh3779/view-vscode-in-chat/releases/latest)
+
 같은 네트워크(LAN/Wi-Fi)에 있는 기기끼리 접속하는 VS Code 스타일 채팅입니다. 외부 의존성 없이 Node 18+만 있으면 동작합니다.
 
 화면은 **두 가지로 완전히 분리**되어 있습니다.
@@ -79,6 +82,11 @@ macOS에서 처음 실행할 때 "들어오는 연결 허용" 창이 뜨면 허�
 - `cli.js` — 터미널 클라이언트 (방 검색, 일반 대화창 / 내 CLI 대화창, 본인 키로 에이전트 실행)
 - `app/` — Electron 메인 프로세스, 런처(방 만들기/참가), LAN 자동 검색
 - `public/` — VS Code 형태의 UI (`index.html`, `style.css`, `app.js`)
+
+## 내려받아 쓰기
+
+설치 파일은 [릴리즈 페이지](https://github.com/jh3779/view-vscode-in-chat/releases/latest)에 있습니다 (macOS `.dmg`, Windows `.exe`, Linux `.AppImage`).
+코드 서명이 없어 첫 실행 때 경고가 뜹니다 — macOS는 우클릭 → 열기, Windows는 추가 정보 → 실행으로 진행하세요.
 
 ## 테스트
 
