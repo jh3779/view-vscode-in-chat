@@ -62,6 +62,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tree li .ico { font-family: var(--mono); font-size: 11px; color: #519aba; width: 14px; text-align: center; }
 .tree li .unread { margin-left: auto; background: var(--accent); color: #fff; border-radius: 8px; padding: 0 5px; font-size: 10px; }
 .tree li .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.tree li .star { color: var(--prompt); }
+.tree li .state { margin-left: auto; color: var(--fg-dim); font-size: 11px; }
+.tree li.agent .state { color: var(--prompt); }
 .tree li.me::after { content: "(you)"; color: var(--fg-dim); font-size: 11px; }
 
 /* Editor */
@@ -104,6 +107,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 .msg.system { margin: 0 0 6px; color: var(--fg-dim); font-size: 12px; }
 .msg.system .bullet { color: var(--green); }
+.msg.agent .bullet { color: var(--prompt); }
+.msg .tag { font-size: 10px; color: var(--prompt); border: 1px solid #6b4a36; border-radius: 3px; padding: 0 4px; line-height: 1.5; }
+.msg.agent .body b { color: var(--fg-bright); }
+.typing .spin.dim { color: var(--fg-dim); }
 .tool { color: var(--fg); }
 .tool b { color: var(--fg-bright); }
 .tool-out { color: var(--fg-dim); padding-left: 2px; white-space: pre-wrap; }
@@ -120,6 +127,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 .body code { background: #2d2d2d; color: var(--orange); padding: 0 4px; border-radius: 3px; }
 .body pre { background: #181818; border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin: 6px 0; overflow-x: auto; white-space: pre; color: #9cdcfe; }
+.body .mention.agent { background: #4a2e1f; color: #f0b48a; }
 .body .mention { color: var(--fg-bright); background: var(--accent-soft); border-radius: 3px; padding: 0 2px; }
 .body a { color: #3794ff; }
 

@@ -10,6 +10,8 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const HISTORY_LIMIT = 200;
 const MAX_TEXT = 2000;
 const MAX_NICK = 20;
+const MAX_AGENT_TEXT = 8000;
+const AGENT = { nick: 'claude', color: '#d7875f' };
 const DEFAULT_CHANNELS = ['general', 'random', 'dev'];
 
 const MIME = {
@@ -22,7 +24,7 @@ const MIME = {
 
 // channel -> message[]
 const history = new Map(DEFAULT_CHANNELS.map((c) => [c, []]));
-// clientId -> { id, nick, color, res, lastSent, lastTyping }
+// clientId -> { id, nick, color, res, lastSent, lastTyping, kind }
 const clients = new Map();
 
 const COLORS = ['#4fc1ff', '#c586c0', '#dcdcaa', '#4ec9b0', '#ce9178', '#b5cea8', '#d7ba7d', '#9cdcfe', '#f48771'];
@@ -35,7 +37,8 @@ function lanAddresses() {
 }
 
 function sanitizeNick(nick) {
-  return String(nick || '').replace(/[\s\u0000-\u001f]+/g, '').slice(0, MAX_NICK);
+  const n = String(nick || '').replace(/[\s\u0000-\u001f]+/g, '').slice(0, MAX_NICK);
+  return n.toLowerCase() === AGENT.nick ? '' : n; // 에이전트 이름은 예약
 }
 
 function sanitizeChannel(ch) {
@@ -51,7 +54,7 @@ function broadcast(event, data) {
 }
 
 function userList() {
-  return [...clients.values()].map((c) => ({ id: c.id, nick: c.nick, color: c.color }));
+  return [...clients.values()].map((c) => ({ id: c.id, nick: c.nick, color: c.color, kind: c.kind }));
 }
 
 function channelList() {
@@ -69,8 +72,8 @@ function pushMessage(channel, msg) {
   broadcast('message', msg);
 }
 
-function system(channel, text) {
-  pushMessage(channel, { id: crypto.randomUUID(), type: 'system', channel, text, ts: Date.now() });
+function system(channel, text, extra = {}) {
+  pushMessage(channel, { id: crypto.randomUUID(), type: 'system', channel, text, ts: Date.now(), ...extra });
 }
 
 function readBody(req) {
@@ -115,7 +118,8 @@ function handleEvents(req, res, url) {
   });
   res.write('retry: 2000\n\n');
 
-  const client = { id, nick, color, res, lastSent: 0 };
+  const kind = url.searchParams.get('client') === 'cli' ? 'cli' : 'web';
+  const client = { id, nick, color, res, lastSent: 0, kind };
   clients.set(id, client);
 
   send(res, 'welcome', {
@@ -158,6 +162,9 @@ async function handleSend(req, res) {
     }
     return json(res, 200, { ok: true });
   }
+  // 에이전트 출력 중계: 에이전트는 요청한 사람의 PC에서 그 사람의 키로 실행되고, 결과만 방에 공유됩니다.
+  if (body.type && body.type.startsWith('agent-')) return relayAgent(res, client, body, now);
+
   if (now - client.lastSent < 150) return json(res, 429, { error: '너무 빠르게 보내고 있습니다.' });
   client.lastSent = now;
 
@@ -185,7 +192,7 @@ async function handleSend(req, res) {
   const text = String(body.text || '').slice(0, MAX_TEXT);
   if (!text.trim()) return json(res, 400, { error: 'empty' });
 
-  pushMessage(channel, {
+  const msg = {
     id: crypto.randomUUID(),
     type: body.type === 'action' ? 'action' : 'chat',
     channel,
@@ -194,7 +201,28 @@ async function handleSend(req, res) {
     color: client.color,
     text,
     ts: now,
-  });
+  };
+  pushMessage(channel, msg);
+  json(res, 200, { ok: true });
+}
+
+function relayAgent(res, client, body, now) {
+  const channel = sanitizeChannel(body.channel) || 'general';
+  const base = { userId: `agent:${client.id}`, nick: AGENT.nick, color: AGENT.color, agent: true, via: client.nick };
+  if (body.type === 'agent-typing') {
+    broadcast('typing', { ...base, channel, detail: String(body.detail || '생각 중').slice(0, 120), since: Number(body.since) || now, ts: now });
+  } else if (body.type === 'agent-idle') {
+    broadcast('typing-end', { userId: base.userId, channel });
+  } else if (body.type === 'agent-text') {
+    const text = String(body.text || '').slice(0, MAX_AGENT_TEXT);
+    if (!text.trim()) return json(res, 400, { error: 'empty' });
+    pushMessage(channel, { id: crypto.randomUUID(), type: 'chat', channel, ts: now, text, ...base });
+  } else if (body.type === 'agent-log') {
+    const text = String(body.text || '').slice(0, 500);
+    pushMessage(channel, { id: crypto.randomUUID(), type: 'system', channel, ts: now, text, agent: true, via: client.nick });
+  } else {
+    return json(res, 400, { error: 'unknown agent event' });
+  }
   json(res, 200, { ok: true });
 }
 
