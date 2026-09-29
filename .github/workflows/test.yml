@@ -35,4 +35,4 @@ jobs:
           done
 
       - name: 테스트
-        run: node --test "test/*.test.js"
+        run: node --test test/*.test.js
