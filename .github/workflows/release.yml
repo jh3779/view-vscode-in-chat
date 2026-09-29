@@ -1,0 +1,60 @@
+name: release
+
+# 태그를 밀거나(v*) 수동 실행하면 각 OS 네이티브 러너에서 설치 파일을 만들어
+# 해당 릴리즈에 첨부한다. 코드 서명은 하지 않는다(인증서 없음).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '첨부할 릴리즈 태그 (예: v0.3.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+            args: --mac
+            out: 'dist/*.dmg'
+          - os: windows-latest
+            name: Windows
+            args: --win
+            out: 'dist/*.exe'
+          - os: ubuntu-latest
+            name: Linux
+            args: --linux
+            out: 'dist/*.AppImage'
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - run: npm ci
+
+      - name: 설치 파일 빌드
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          # 서명 인증서가 없으므로 자동 탐색을 끈다 — 켜두면 빌드가 실패한다.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: 릴리즈에 첨부
+        run: gh release upload "${{ github.event.inputs.tag || github.ref_name }}" ${{ matrix.out }} --clobber
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}

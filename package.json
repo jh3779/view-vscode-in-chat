@@ -18,6 +18,8 @@
   },
   "build": {
     "appId": "com.jihun.lanchat",
+    "productName": "LAN Chat",
+    "copyright": "Copyright © 2026 우지훈",
     "files": [
       "app/**",
       "public/**",
@@ -26,8 +28,51 @@
       "cli.js",
       "package.json"
     ],
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
     "mac": {
-      "category": "public.app-category.social-networking"
+      "category": "public.app-category.social-networking",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "identity": null,
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "같은 네트워크의 채팅 방을 찾고 연결하는 데 사용합니다."
+      }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Network"
     }
   },
   "engines": {
@@ -54,5 +99,9 @@
     "claude",
     "cli",
     "offline"
-  ]
+  ],
+  "author": {
+    "name": "우지훈",
+    "url": "https://github.com/jh3779"
+  }
 }
