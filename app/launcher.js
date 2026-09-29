@@ -66,8 +66,17 @@ async function choose() {
   if (!n) return;
   if (it.kind === 'manual' && !addrInput.value.trim()) return addrInput.focus();
   busy = true;
-  $('err').className = 'err ok';
-  $('err').textContent = it.kind === 'host' ? '⏺ Host()\n  ⎿  서버를 시작하는 중…' : '⏺ Connect()\n  ⎿  연결하는 중…';
+  // 경과 시간을 보여 준다. 멈춘 건지 진행 중인지 화면만 보고 알 수 있어야 한다.
+  const label = it.kind === 'host' ? 'Host()' : 'Connect()';
+  const doing = it.kind === 'host' ? '서버를 시작하는 중' : '연결하는 중';
+  const t0 = Date.now();
+  const tick = () => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    $('err').className = 'err ok';
+    $('err').textContent = `⏺ ${label}\n  ⎿  ${doing}… ${s ? `(${s}s)` : ''}`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
   try {
     if (it.kind === 'host') await window.launcher.host(n, 3000);
     else if (it.kind === 'room') await window.launcher.join(n, `${it.room.ip}:${it.room.port}`);
@@ -76,6 +85,8 @@ async function choose() {
     $('err').className = 'err';
     $('err').textContent = `✗ ${String(e.message).replace(/^Error invoking remote method '\w+': (Error: )?/, '')}`;
     busy = false;
+  } finally {
+    clearInterval(timer);
   }
 }
 

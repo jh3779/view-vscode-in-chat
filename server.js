@@ -356,7 +356,11 @@ async function start({ port = PORT, host = '0.0.0.0' } = {}) {
 function stop() {
   for (const c of clients.values()) c.res.end();
   clients.clear();
-  return new Promise((resolve) => server.close(() => resolve()));
+  const closed = new Promise((resolve) => server.close(() => resolve()));
+  // res.end() 만으로는 keep-alive 소켓이 남아 close 콜백이 늦어질 수 있다.
+  // 브라우저는 스트림이 끝나도 소켓을 재사용하려 붙들고 있으므로 명시적으로 끊는다.
+  server.closeAllConnections?.();
+  return closed;
 }
 
 module.exports = { start, stop, lanAddresses, stats: () => ({ users: clients.size }) };

@@ -199,3 +199,36 @@ test('키 형식이 맞지 않으면 서버가 새로 발급한다', async () =>
   assert.match(c.welcome.key, /^[A-Za-z0-9_-]{16,64}$/);
   assert.notEqual(c.welcome.key, 'short');
 });
+
+test('참가자가 붙어 있어도 방을 닫고 곧바로 다시 열 수 있다', async () => {
+  // v0.3.1 에서 보고된 증상: 참가자가 연결된 방을 닫고 새 방을 열면 런처가
+  // "서버를 시작하는 중…" 에서 20초 넘게 멈췄다. stop() 이 keep-alive 소켓을
+  // 기다리면 재시작도 함께 늦어지므로, 둘 다 즉시 끝나야 한다.
+  const net = require('node:net');
+  const port = Number(new URL(base).port);
+
+  // 브라우저처럼 응답이 끝나도 소켓을 붙들고 있는 참가자
+  const peer = await new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1', () => {
+      s.write(`GET /events?nick=peer HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n`);
+    });
+    s.on('error', () => {});
+    s.once('data', () => resolve(s));
+  });
+
+  const t0 = Date.now();
+  await server.stop();
+  const stopMs = Date.now() - t0;
+
+  const t1 = Date.now();
+  const again = await server.start({ port: 0, host: '127.0.0.1' });
+  const startMs = Date.now() - t1;
+  peer.destroy();
+
+  assert.ok(stopMs < 3000, `stop() 이 ${stopMs}ms 걸렸다 — 참가자 소켓을 기다리면 안 된다`);
+  assert.ok(startMs < 3000, `재시작이 ${startMs}ms 걸렸다`);
+  assert.ok(again.port > 0, '재시작 후 포트를 얻어야 한다');
+
+  // 뒤따르는 after() 훅이 정상 동작하도록 base 를 새 포트로 맞춘다.
+  base = `http://127.0.0.1:${again.port}`;
+});

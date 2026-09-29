@@ -1,7 +1,7 @@
 {
   "name": "lan-agent-chat",
   "productName": "LAN Chat",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "같은 네트워크(LAN)에서 쓰는 VS Code 스타일 채팅 — 일반 대화창과 개인 AI CLI 대화창 분리",
   "main": "app/main.js",
   "bin": {
@@ -47,7 +47,8 @@
       "identity": null,
       "extendInfo": {
         "NSLocalNetworkUsageDescription": "같은 네트워크의 채팅 방을 찾고 연결하는 데 사용합니다."
-      }
+      },
+      "artifactName": "LAN-Chat-macOS-${arch}.${ext}"
     },
     "win": {
       "target": [
@@ -57,7 +58,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "artifactName": "LAN-Chat-Windows-x64.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -73,7 +75,8 @@
           ]
         }
       ],
-      "category": "Network"
+      "category": "Network",
+      "artifactName": "LAN-Chat-Linux-x86_64.${ext}"
     }
   },
   "engines": {

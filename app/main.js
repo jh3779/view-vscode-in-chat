@@ -114,9 +114,24 @@ function stopHosting() {
 }
 
 // ---------- IPC from launcher ----------
+// 어떤 단계도 무한정 기다리지 않는다. 런처가 '서버를 시작하는 중…'에 갇히면
+// 사용자는 원인을 알 수 없고 앱을 강제 종료하는 수밖에 없다.
+function withTimeout(promise, ms, what) {
+  let t;
+  return Promise.race([
+    promise.finally(() => clearTimeout(t)),
+    new Promise((_r, reject) => { t = setTimeout(() => reject(new Error(`${what} 시간 초과 (${ms / 1000}초)`)), ms); }),
+  ]);
+}
+
 ipcMain.handle('host', async (_e, { nick, port }) => {
-  if (stopping) await stopping; // 직전 방이 닫히는 중이면 기다린다
-  const res = await server.start({ port: Number(port) || 3000, host: '0.0.0.0' });
+  // 직전 방이 닫히는 중이면 잠깐 기다리되, 끝나지 않아도 진행한다.
+  if (stopping) await withTimeout(stopping, 5000, '이전 방 종료').catch(() => {});
+  const res = await withTimeout(
+    server.start({ port: Number(port) || 3000, host: '0.0.0.0' }),
+    10000,
+    '서버 시작',
+  );
   hosting = { port: res.port, name: `${nick}의 방`, timer: setInterval(sendBeacon, BEACON_MS) };
   sendBeacon();
   openChat(`http://localhost:${res.port}`, nick);
