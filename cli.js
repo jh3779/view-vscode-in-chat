@@ -21,9 +21,10 @@ const opt = (name) => {
   return v;
 };
 if (argv.includes('-h') || argv.includes('--help')) {
-  console.log(`사용법: node cli.js [주소] [--nick 이름] [--cwd 폴더] [--model 모델] [--tools ${DEFAULT_TOOLS}] [--claude 경로]
+  console.log(`사용법: node cli.js [주소] [--nick 이름] [--password 비밀번호] [--cwd 폴더] [--model 모델] [--tools ${DEFAULT_TOOLS}] [--claude 경로]
 
   주소를 생략하면 같은 네트워크의 방을 자동으로 찾습니다.
+  비밀번호가 걸린 방이면 --password 로 주거나, 생략하면 접속할 때 물어봅니다.
   @claude 요청은 이 PC에서, 이 터미널 환경의 claude 로그인 또는 ANTHROPIC_API_KEY로 실행됩니다.`);
   process.exit(0);
 }
@@ -36,6 +37,7 @@ const options = {
   model: opt('model') || '',
   tools: opt('tools') || DEFAULT_TOOLS,
   claude: opt('claude'),
+  password: opt('password'),
   address: argv.find((a) => !a.startsWith('-')) || null,
 };
 // CLI 대화창 소유권 키. 이 기기에만 저장되며, 이 값을 아는 연결만 내 CLI 창을 본다.
@@ -149,6 +151,8 @@ const state = {
   lastTypingSent: 0,
   lastAgentTyping: 0,
   quitting: false,
+  token: '',
+  locked: false,
 };
 
 // ---------- screen: 출력 영역 + (스피너) + 프롬프트 ----------
@@ -245,7 +249,7 @@ function welcome() {
     '',
     dim('  /help 로 명령어 보기, /cli 로 내 에이전트 창 열기'),
     '',
-    `  host:  ${host}`,
+    `  host:  ${host}${state.locked ? '  🔒 비밀번호 있음' : ''}`,
     `  cwd:   ${options.cwd.replace(os.homedir(), '~')}`,
     `  agent: ${claude ? `${auth} · ${options.tools === DEFAULT_TOOLS ? '읽기 전용' : options.tools}` : 'claude CLI 없음'}`,
   ]));
@@ -293,7 +297,7 @@ async function connect() {
   while (!state.quitting) {
     state.controller = new AbortController();
     try {
-      const url = `${state.base}/events?client=cli&key=${encodeURIComponent(state.key)}&nick=${encodeURIComponent(state.nick)}`;
+      const url = `${state.base}/events?client=cli&key=${encodeURIComponent(state.key)}&token=${encodeURIComponent(state.token)}&nick=${encodeURIComponent(state.nick)}`;
       const res = await fetch(url, { signal: state.controller.signal, headers: { Accept: 'text/event-stream' } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const reader = res.body.getReader();
@@ -578,6 +582,53 @@ function discover(ms = 2500) {
 
 const ask = (q) => new Promise((r) => rl.question(q, r));
 
+// 비밀번호를 칠 때만 화면 에코를 끈다(sudo 와 같은 방식). readline 의 내부 훅을
+// 잠시 갈아끼우되, 끝나면 반드시 원래 함수로 되돌린다 — null 로 두면 이후 입력에서
+// readline 이 죽는다.
+function askHidden(q) {
+  return new Promise((resolve) => {
+    const original = rl._writeToOutput;
+    out$.write(q);
+    rl._writeToOutput = () => {};
+    rl.question('', (v) => {
+      rl._writeToOutput = original;
+      out$.write('\n');
+      resolve(v);
+    });
+  });
+}
+
+// 방이 잠겨 있으면 비밀번호를 확인하고 입장 토큰을 받는다.
+async function authenticate() {
+  let info;
+  try {
+    info = await fetch(`${state.base}/api/room`).then((r) => (r.ok ? r.json() : null));
+  } catch {
+    print(RED(`✗ ${state.base} 에 연결할 수 없습니다`));
+    process.exit(1);
+  }
+  if (!info || !info.locked) return true;
+  state.locked = true;
+
+  let pw = options.password;
+  for (let i = 0; i < 3; i++) {
+    if (!pw) {
+      pw = await askHidden(`${ORANGE('🔒')} 방 비밀번호: `);
+    }
+    const r = await fetch(`${state.base}/auth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    }).catch(() => null);
+    const d = r ? await r.json().catch(() => ({})) : {};
+    if (r && r.ok) { state.token = d.token || ''; return true; }
+    out$.write(RED(`  ✗ ${d.error || '인증 실패'}\n`));
+    pw = '';
+  }
+  out$.write(RED('  ✗ 입장하지 못했습니다\n'));
+  process.exit(1);
+}
+
 async function main() {
   rl = readline.createInterface({ input: process.stdin, output: out$, terminal: true, historySize: 100 });
 
@@ -585,7 +636,7 @@ async function main() {
     out$.write(`${ORANGE('✻')} 같은 네트워크에서 방을 찾는 중…\n`);
     const rooms = await discover();
     if (rooms.length) {
-      rooms.forEach((r, i) => out$.write(`  ${i + 1}. ${r.name}  ${dim(`${r.ip}:${r.port} · ${r.users}명`)}\n`));
+      rooms.forEach((r, i) => out$.write(`  ${i + 1}. ${r.locked ? '🔒 ' : ''}${r.name}  ${dim(`${r.ip}:${r.port} · ${r.users}명${r.locked ? ' · 비밀번호 필요' : ''}`)}\n`));
       out$.write(`  ${rooms.length + 1}. ${dim('주소 직접 입력')}\n`);
       const pick = Number(await ask(`${bold('>')} 번호: `));
       if (pick >= 1 && pick <= rooms.length) options.address = `${rooms[pick - 1].ip}:${rooms[pick - 1].port}`;
@@ -604,6 +655,8 @@ async function main() {
   if (!state.nick) process.exit(1);
   state.key = ensureKey();
   saveConfig({ nick: state.nick, key: state.key });
+
+  await authenticate();
 
   rl.setPrompt(promptText());
   rl.on('line', onLine);

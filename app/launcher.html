@@ -32,6 +32,7 @@
     #manual { margin: 6px 0 0 2ch; display: none; }
     #manual.show { display: flex; }
     .foot { color: var(--dim); margin-top: 14px; font-size: 11px; }
+    .lock { color: var(--accent); }
     .err { color: var(--red); margin-top: 8px; min-height: 1.6em; white-space: pre-wrap; }
     .ok { color: var(--green); }
   </style>
@@ -50,6 +51,9 @@
     <div class="q">무엇을 할까요?</div>
     <ul id="menu"></ul>
     <div class="field" id="manual"><span>&gt;</span><input id="addr" placeholder="172.30.1.86:3000" /></div>
+
+    <div class="q" id="pwLabel" style="display:none"></div>
+    <div class="field" id="pwField" style="display:none"><span>🔒</span><input id="pw" type="password" autocomplete="off" /></div>
 
     <div class="err" id="err"></div>
     <div class="foot">↑↓ 이동 · Enter 선택 · 숫자키 바로 선택</div>

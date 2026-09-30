@@ -33,7 +33,10 @@ beaconSocket.bind(() => beaconSocket.setBroadcast(true));
 
 function sendBeacon() {
   if (!hosting) return;
-  const msg = Buffer.from(JSON.stringify({ app: 'lan-agent-chat', v: 1, name: hosting.name, port: hosting.port, users: server.stats().users }));
+  const msg = Buffer.from(JSON.stringify({
+    app: 'lan-agent-chat', v: 1, name: hosting.name, port: hosting.port,
+    users: server.stats().users, locked: server.isLocked(),
+  }));
   for (const t of broadcastTargets()) beaconSocket.send(msg, DISCOVERY_PORT, t, () => {});
 }
 
@@ -44,7 +47,10 @@ listenSocket.on('message', (buf, rinfo) => {
     const b = JSON.parse(buf.toString('utf8'));
     if (b.app !== 'lan-agent-chat' || !Number.isInteger(b.port)) return;
     const key = `${rinfo.address}:${b.port}`;
-    rooms.set(key, { ip: rinfo.address, port: b.port, name: String(b.name || '').slice(0, 40), users: Number(b.users) || 0, seen: Date.now() });
+    rooms.set(key, {
+      ip: rinfo.address, port: b.port, name: String(b.name || '').slice(0, 40),
+      users: Number(b.users) || 0, locked: Boolean(b.locked), seen: Date.now(),
+    });
   } catch {}
 });
 listenSocket.bind(DISCOVERY_PORT);
@@ -69,9 +75,10 @@ function createLauncher() {
   launcher.on('closed', () => { launcher = null; });
 }
 
-function openChat(baseUrl, nick) {
+function openChat(baseUrl, nick, token) {
   const url = new URL(baseUrl);
   url.searchParams.set('nick', nick);
+  if (token) url.searchParams.set('token', token);
   chat = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -124,21 +131,35 @@ function withTimeout(promise, ms, what) {
   ]);
 }
 
-ipcMain.handle('host', async (_e, { nick, port }) => {
+ipcMain.handle('host', async (_e, { nick, port, password }) => {
   // 직전 방이 닫히는 중이면 잠깐 기다리되, 끝나지 않아도 진행한다.
   if (stopping) await withTimeout(stopping, 5000, '이전 방 종료').catch(() => {});
   const res = await withTimeout(
-    server.start({ port: Number(port) || 3000, host: '0.0.0.0' }),
+    server.start({ port: Number(port) || 3000, host: '0.0.0.0', password: String(password || '') }),
     10000,
     '서버 시작',
   );
   hosting = { port: res.port, name: `${nick}의 방`, timer: setInterval(sendBeacon, BEACON_MS) };
   sendBeacon();
-  openChat(`http://localhost:${res.port}`, nick);
+  // 방장도 같은 문을 통과한다 — 비밀번호를 건 방이면 본인 토큰을 발급받아 들어간다.
+  const token = res.locked ? await fetchToken(`http://localhost:${res.port}`, password) : '';
+  openChat(`http://localhost:${res.port}`, nick, token);
   return res;
 });
 
-ipcMain.handle('join', async (_e, { nick, address }) => {
+// 비밀번호를 확인하고 입장 토큰을 받아 온다.
+async function fetchToken(origin, password) {
+  const r = await fetch(`${origin}/auth`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: String(password || '') }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `인증 실패 (${r.status})`);
+  return d.token || '';
+}
+
+ipcMain.handle('join', async (_e, { nick, address, password }) => {
   let target = String(address || '').trim();
   if (!/^https?:\/\//.test(target)) target = `http://${target}`;
   const url = new URL(target);
@@ -146,16 +167,39 @@ ipcMain.handle('join', async (_e, { nick, address }) => {
   // 서버가 살아있는지 확인
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 3000);
+  let room;
   try {
-    const r = await fetch(url.origin, { signal: ctrl.signal });
+    const r = await fetch(`${url.origin}/api/room`, { signal: ctrl.signal });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    room = await r.json();
   } catch (err) {
     throw new Error(`${url.host} 에 연결할 수 없습니다 (${err.name === 'AbortError' ? '시간 초과' : err.message})`);
   } finally {
     clearTimeout(t);
   }
-  openChat(url.origin, nick);
-  return { ok: true };
+
+  // 비밀번호는 창을 열기 전에 확인한다 — 틀렸으면 빈 창 대신 런처에서 바로 알려 준다.
+  const token = room.locked ? await fetchToken(url.origin, password) : '';
+  openChat(url.origin, nick, token);
+  return { ok: true, locked: Boolean(room.locked) };
+});
+
+// 런처가 잠긴 방인지 미리 물어본다(비콘이 없거나 주소를 직접 넣은 경우).
+ipcMain.handle('probe', async (_e, { address }) => {
+  let target = String(address || '').trim();
+  if (!/^https?:\/\//.test(target)) target = `http://${target}`;
+  const url = new URL(target);
+  if (!url.port) url.port = '3000';
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 3000);
+  try {
+    const r = await fetch(`${url.origin}/api/room`, { signal: ctrl.signal });
+    return r.ok ? await r.json() : { locked: false, unreachable: true };
+  } catch {
+    return { locked: false, unreachable: true };
+  } finally {
+    clearTimeout(t);
+  }
 });
 
 ipcMain.handle('info', () => ({ addresses: server.lanAddresses(), platform: process.platform, version: app.getVersion() }));

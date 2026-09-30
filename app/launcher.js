@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const nickInput = $('nick');
 const addrInput = $('addr');
+const pwInput = $('pw');
 const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 
 let rooms = [];
@@ -16,8 +17,13 @@ window.launcher.info().then(({ addresses }) => {
 
 function items() {
   return [
-    { kind: 'host', label: '새 방 열기', sub: '이 PC에서 서버를 시작합니다' },
-    ...rooms.map((r) => ({ kind: 'room', room: r, label: r.name || '이름 없는 방', sub: `${r.ip}:${r.port} · ${r.users}명 접속 중` })),
+    { kind: 'host', label: '새 방 열기', sub: '이 PC에서 서버를 시작합니다 · 비밀번호 선택' },
+    ...rooms.map((r) => ({
+      kind: 'room',
+      room: r,
+      label: (r.locked ? '🔒 ' : '') + (r.name || '이름 없는 방'),
+      sub: `${r.ip}:${r.port} · ${r.users}명 접속 중${r.locked ? ' · 비밀번호 필요' : ''}`,
+    })),
     { kind: 'manual', label: '주소 직접 입력…', sub: 'IP:포트' },
   ];
 }
@@ -46,7 +52,45 @@ function render() {
     }
   });
   $('manual').classList.toggle('show', list[sel].kind === 'manual');
+  syncPasswordField(list[sel]);
 }
+
+// 비밀번호 칸은 필요할 때만 보여 준다.
+//  - 새 방 열기: 선택 사항(비우면 누구나 들어오는 방)
+//  - 잠긴 방 참가: 필수
+//  - 주소 직접 입력: 아직 잠김 여부를 모르므로 물어본 뒤 결정한다
+let pwShownFor = null;
+function syncPasswordField(it) {
+  const want = it.kind === 'host' ? 'set' : it.kind === 'room' ? (it.room.locked ? 'need' : null) : manualLocked;
+  const label = $('pwLabel');
+  if (!want) {
+    label.style.display = 'none';
+    $('pwField').style.display = 'none';
+    pwShownFor = null;
+    return;
+  }
+  label.style.display = '';
+  $('pwField').style.display = 'flex';
+  label.textContent = want === 'set' ? '방 비밀번호 (선택 — 비우면 누구나 입장)' : '방 비밀번호';
+  label.className = want === 'need' ? 'q lock' : 'q';
+  const kindKey = `${it.kind}:${it.room ? `${it.room.ip}:${it.room.port}` : ''}`;
+  if (pwShownFor !== kindKey) { pwInput.value = ''; pwShownFor = kindKey; }
+}
+
+// 주소를 직접 입력하는 경우 잠김 여부를 서버에 물어본다.
+let manualLocked = null;
+let probeTimer = null;
+function probeManual() {
+  clearTimeout(probeTimer);
+  const addr = addrInput.value.trim();
+  if (!addr) { manualLocked = null; return render(); }
+  probeTimer = setTimeout(async () => {
+    const info = await window.launcher.probe(addr).catch(() => null);
+    manualLocked = info && info.locked ? 'need' : null;
+    render();
+  }, 500);
+}
+addrInput.addEventListener('input', probeManual);
 
 function nick() {
   const n = nickInput.value.replace(/\s+/g, '').slice(0, 20);
@@ -65,6 +109,12 @@ async function choose() {
   const n = nick();
   if (!n) return;
   if (it.kind === 'manual' && !addrInput.value.trim()) return addrInput.focus();
+  const needsPw = (it.kind === 'room' && it.room.locked) || (it.kind === 'manual' && manualLocked === 'need');
+  if (needsPw && !pwInput.value) {
+    $('err').className = 'err';
+    $('err').textContent = '✗ 이 방은 비밀번호가 필요합니다';
+    return pwInput.focus();
+  }
   busy = true;
   // 경과 시간을 보여 준다. 멈춘 건지 진행 중인지 화면만 보고 알 수 있어야 한다.
   const label = it.kind === 'host' ? 'Host()' : 'Connect()';
@@ -78,13 +128,15 @@ async function choose() {
   tick();
   const timer = setInterval(tick, 1000);
   try {
-    if (it.kind === 'host') await window.launcher.host(n, 3000);
-    else if (it.kind === 'room') await window.launcher.join(n, `${it.room.ip}:${it.room.port}`);
-    else await window.launcher.join(n, addrInput.value);
+    const password = pwInput.value;
+    if (it.kind === 'host') await window.launcher.host(n, 3000, password);
+    else if (it.kind === 'room') await window.launcher.join(n, `${it.room.ip}:${it.room.port}`, password);
+    else await window.launcher.join(n, addrInput.value, password);
   } catch (e) {
     $('err').className = 'err';
     $('err').textContent = `✗ ${String(e.message).replace(/^Error invoking remote method '\w+': (Error: )?/, '')}`;
     busy = false;
+    if (/비밀번호|인증/.test(e.message)) { pwInput.value = ''; pwInput.focus(); }
   } finally {
     clearInterval(timer);
   }
@@ -101,7 +153,7 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'Enter' && !e.isComposing) {
     e.preventDefault();
     choose();
-  } else if (/^[1-9]$/.test(e.key) && document.activeElement !== nickInput && document.activeElement !== addrInput) {
+  } else if (/^[1-9]$/.test(e.key) && ![nickInput, addrInput, pwInput].includes(document.activeElement)) {
     const i = Number(e.key) - 1;
     if (i < list.length) { sel = i; render(); choose(); }
   }
