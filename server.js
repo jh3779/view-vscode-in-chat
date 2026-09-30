@@ -22,6 +22,7 @@ const BUCKETS = {
   say: { capacity: 6, refillMs: 300 }, // 사람이 직접 보내는 메시지
   hint: { capacity: 2, refillMs: 1000 }, // 저장되지 않는 일시 신호
   agent: { capacity: 30, refillMs: 200 }, // 에이전트 출력 — 도구 로그가 연달아 온다
+  auth: { capacity: 5, refillMs: 10000 }, // 비밀번호 시도 — 무차별 대입 방어
 };
 
 const POLICY = {
@@ -40,15 +41,63 @@ const POLICY = {
 // 1000자마다 토큰을 하나 더 쓴다 — 긴 메시지가 짧은 메시지와 같은 값이 되지 않도록.
 const costOf = (text) => 1 + Math.floor(text.length / 1000);
 
-function take(client, name, amount) {
+function take(holder, name, amount) {
   const spec = BUCKETS[name];
   const now = Date.now();
-  const b = (client.buckets[name] ||= { tokens: spec.capacity, ts: now });
+  const b = (holder.buckets[name] ||= { tokens: spec.capacity, ts: now });
   b.tokens = Math.min(spec.capacity, b.tokens + (now - b.ts) / spec.refillMs);
   b.ts = now;
   if (b.tokens < amount) return false;
   b.tokens -= amount;
   return true;
+}
+
+// ---------- 방 비밀번호 ----------
+// 비밀번호를 정한 방은 토큰 없이는 이벤트 스트림에 붙을 수 없다. 정적 파일(앱 껍데기)은
+// 누구나 받을 수 있지만, 대화 내용은 전부 스트림으로만 나가므로 경계는 여기 하나다.
+let roomAuth = null; // { salt, hash } — null 이면 비밀번호 없는 방
+const tokens = new Set();
+const authTries = new Map(); // ip -> { buckets }
+
+function setPassword(pw) {
+  const s = String(pw || '');
+  tokens.clear();
+  // 이전 실패 횟수는 지금 없어진 비밀번호에 대한 것이므로 함께 비운다.
+  // 비밀번호를 바꿀 수 있는 건 방장뿐이라 이 초기화가 공격자에게 열려 있지 않다.
+  authTries.clear();
+  for (const c of clients.values()) c.res.end(); // 규칙이 바뀌면 전원 재인증
+  clients.clear();
+  if (!s) {
+    roomAuth = null;
+    return false;
+  }
+  const salt = crypto.randomBytes(16);
+  roomAuth = { salt, hash: crypto.scryptSync(s, salt, 64) };
+  return true;
+}
+
+// scrypt 는 느리게 설계된 해시라 대입 공격 자체가 비싸고, 비교는 길이·내용 모두
+// 상수 시간으로 한다.
+function passwordOk(pw) {
+  if (!roomAuth) return true;
+  const got = crypto.scryptSync(String(pw || ''), roomAuth.salt, 64);
+  return crypto.timingSafeEqual(got, roomAuth.hash);
+}
+
+const isLocked = () => Boolean(roomAuth);
+const tokenOk = (t) => !roomAuth || tokens.has(String(t || ''));
+
+function issueToken() {
+  const t = crypto.randomBytes(24).toString('base64url');
+  tokens.add(t);
+  return t;
+}
+
+function authAllowed(ip) {
+  const key = String(ip || '?');
+  const holder = authTries.get(key) || { buckets: {} };
+  authTries.set(key, holder);
+  return take(holder, 'auth', 1);
 }
 
 const MIME = {
@@ -173,6 +222,10 @@ function json(res, status, data) {
 }
 
 function handleEvents(req, res, url) {
+  // 비밀번호가 걸린 방은 여기서 막는다. 대화 내용은 전부 이 스트림으로만 나가므로
+  // 이 한 곳만 지키면 방 안의 어떤 것도 인증 없이 새지 않는다.
+  if (!tokenOk(url.searchParams.get('token'))) return json(res, 401, { error: '인증이 필요합니다.' });
+
   const nick = sanitizeNick(url.searchParams.get('nick')) || `guest${Math.floor(Math.random() * 9000 + 1000)}`;
   const id = crypto.randomUUID();
   const color = COLORS[clients.size % COLORS.length];
@@ -304,6 +357,27 @@ function relayAgent(res, client, body, type, text, now) {
   json(res, 200, { ok: true });
 }
 
+// 방 상태 조회. 로그인 화면을 그리려면 인증 전에도 읽을 수 있어야 하므로 열어 둔다.
+// 비밀번호 유무와, 가진 토큰이 아직 유효한지만 알려 준다.
+function handleRoomInfo(res, url) {
+  json(res, 200, { locked: isLocked(), authed: tokenOk(url.searchParams.get('token')) });
+}
+
+async function handleAuth(req, res) {
+  const ip = req.socket.remoteAddress;
+  if (!authAllowed(ip)) return json(res, 429, { error: '시도가 너무 잦습니다. 잠시 후 다시 해 주세요.' });
+
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return json(res, e.status || 400, { error: e.message });
+  }
+  if (!isLocked()) return json(res, 200, { token: '', locked: false });
+  if (!passwordOk(body.password)) return json(res, 401, { error: '비밀번호가 맞지 않습니다.' });
+  json(res, 200, { token: issueToken(), locked: true });
+}
+
 function serveStatic(req, res, url) {
   const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
   const file = path.normalize(path.join(PUBLIC_DIR, rel));
@@ -324,6 +398,8 @@ function serveStatic(req, res, url) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'GET' && url.pathname === '/events') return handleEvents(req, res, url);
+  if (req.method === 'GET' && url.pathname === '/api/room') return handleRoomInfo(res, url);
+  if (req.method === 'POST' && url.pathname === '/auth') return handleAuth(req, res);
   if (req.method === 'POST' && url.pathname === '/send') return handleSend(req, res);
   if (req.method === 'GET') return serveStatic(req, res, url);
   res.writeHead(405);
@@ -348,14 +424,17 @@ function listen(port, host, attempts) {
 }
 
 // 포트가 사용 중이면 다음 포트로 최대 20번까지 넘어갑니다.
-async function start({ port = PORT, host = '0.0.0.0' } = {}) {
+async function start({ port = PORT, host = '0.0.0.0', password = '' } = {}) {
+  setPassword(password);
   PORT = await listen(port, host, 20);
-  return { port: PORT, addresses: lanAddresses().map((a) => `http://${a}:${PORT}`) };
+  return { port: PORT, locked: isLocked(), addresses: lanAddresses().map((a) => `http://${a}:${PORT}`) };
 }
 
 function stop() {
   for (const c of clients.values()) c.res.end();
   clients.clear();
+  tokens.clear();
+  authTries.clear();
   const closed = new Promise((resolve) => server.close(() => resolve()));
   // res.end() 만으로는 keep-alive 소켓이 남아 close 콜백이 늦어질 수 있다.
   // 브라우저는 스트림이 끝나도 소켓을 재사용하려 붙들고 있으므로 명시적으로 끊는다.
@@ -363,11 +442,18 @@ function stop() {
   return closed;
 }
 
-module.exports = { start, stop, lanAddresses, stats: () => ({ users: clients.size }) };
+module.exports = {
+  start,
+  stop,
+  lanAddresses,
+  setPassword,
+  isLocked,
+  stats: () => ({ users: clients.size, locked: isLocked() }),
+};
 
 if (require.main === module) {
-  start({ host: process.env.HOST || '0.0.0.0' }).then(({ port, addresses }) => {
-    console.log(`\n  채팅 서버가 실행 중입니다.\n`);
+  start({ host: process.env.HOST || '0.0.0.0', password: process.env.ROOM_PASSWORD || '' }).then(({ port, addresses, locked }) => {
+    console.log(`\n  채팅 서버가 실행 중입니다.${locked ? '  🔒 비밀번호 있음' : ''}\n`);
     console.log(`  로컬:          http://localhost:${port}`);
     for (const a of addresses) console.log(`  같은 네트워크: ${a}`);
     console.log('');

@@ -3,6 +3,7 @@
   const log = $('log');
   const input = $('input');
   const form = $('form');
+  const pw = $('pw');
 
   const COMMANDS = [
     ['/help', '명령어 목록 보기'],
@@ -39,6 +40,8 @@
     typing: new Map(), // userId -> { nick, color, channel, ts }
     lastTypingSent: 0,
     key: '',
+    token: '',
+    locked: false,
     cli: [], // 내 CLI 대화창 — 서버가 같은 키를 가진 내 연결에만 보낸다
     cliTyping: null,
   };
@@ -50,6 +53,10 @@
   const KEY_RE = /^[A-Za-z0-9_-]{16,64}$/;
   state.key = safeGet('vschat.key') || '';
   if (!KEY_RE.test(state.key)) state.key = '';
+  // 방 입장 토큰. 비밀번호가 걸린 방에서만 쓰이며 기기에 남는다.
+  state.token = safeGet('vschat.token') || '';
+  const urlToken = params.get('token');
+  if (urlToken) { state.token = urlToken; safeSet('vschat.token', urlToken); }
   const isCli = () => state.active === CLI_TAB;
 
   function safeGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -285,7 +292,7 @@
   function connect() {
     if (state.es) state.es.close();
     setConn(false, '연결 중…');
-    const es = new EventSource(`/events?key=${encodeURIComponent(state.key)}&nick=${encodeURIComponent(state.nick)}`);
+    const es = new EventSource(`/events?key=${encodeURIComponent(state.key)}&token=${encodeURIComponent(state.token)}&nick=${encodeURIComponent(state.nick)}`);
     state.es = es;
 
     es.addEventListener('welcome', (e) => {
@@ -355,9 +362,18 @@
     });
     es.addEventListener('users', (e) => { state.users = JSON.parse(e.data); renderUsers(); });
     es.addEventListener('channels', (e) => { state.channels = JSON.parse(e.data); renderChannels(); });
-    es.onerror = () => {
-      setConn(false, '연결 끊김 — 재연결 중…');
+    es.onerror = async () => {
       es.close();
+      // EventSource 는 상태코드를 알려주지 않으므로 방 상태를 따로 물어
+      // '네트워크 문제'와 '토큰 거부'를 구분한다.
+      const room = await roomInfo();
+      if (room && room.locked && !room.authed) {
+        state.token = '';
+        safeSet('vschat.token', '');
+        setConn(false, '비밀번호 필요');
+        return askPassword('입장 권한이 만료되었습니다. 비밀번호를 다시 입력해 주세요.');
+      }
+      setConn(false, '연결 끊김 — 재연결 중…');
       setTimeout(() => { if (state.es === es) connect(); }, 2000);
     };
   }
@@ -396,6 +412,75 @@
     }
     box.replaceChildren(...rows.map((r) => { const d = el('div'); d.append(...r); return d; }));
     if (!spinTimer) spinTimer = setInterval(() => { spinIdx++; renderTyping(); }, 120);
+  }
+
+  async function roomInfo() {
+    try {
+      const r = await fetch(`/api/room?token=${encodeURIComponent(state.token)}`);
+      return r.ok ? await r.json() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // 비밀번호 단계. 입력칸을 password 로 바꿔 어깨너머로 보이지 않게 한다.
+  function askPassword(message) {
+    state.locked = true;
+    $('caret').textContent = '🔒';
+    input.hidden = true;
+    pw.hidden = false;
+    pw.value = '';
+    log.replaceChildren(lockBanner());
+    if (message) local(message, 'error');
+    renderSuggest();
+    pw.focus();
+  }
+
+  function leavePasswordStep() {
+    pw.hidden = true;
+    pw.value = '';
+    input.hidden = false;
+    $('caret').textContent = state.nick ? '>' : '?';
+    input.focus();
+  }
+
+  function lockBanner() {
+    const wrap = el('div');
+    const box = el('div', 'welcome');
+    const t = el('div', 't');
+    t.append(el('span', 'star', '✻ '), '이 방은 ', el('b', null, '비밀번호'), '가 필요합니다');
+    box.append(t, el('div', 'gap'));
+    box.append(el('div', 'd', '  방을 연 사람에게 비밀번호를 받아 아래에 입력하세요.'));
+    box.append(el('div', 'd', `  host: ${location.host}`));
+    wrap.append(box);
+    return wrap;
+  }
+
+  async function submitPassword(value) {
+    if (!value) return;
+    local('확인하는 중…', 'system');
+    let r;
+    try {
+      r = await fetch('/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: value }),
+      });
+    } catch {
+      return local('서버에 연결할 수 없습니다.', 'error');
+    }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      pw.value = '';
+      pw.focus();
+      return local(d.error || `오류 (${r.status})`, 'error');
+    }
+    state.token = d.token || '';
+    safeSet('vschat.token', state.token);
+    state.locked = false;
+    leavePasswordStep();
+    if (!state.nick) return askNick();
+    connect();
   }
 
   function setConn(ok, text) {
@@ -519,7 +604,7 @@
     if (!list.length) {
       hint.className = 'prompt-hint';
       hint.replaceChildren(
-        el('span', null, state.nick ? '? for shortcuts · / 명령어 · Shift+Enter 줄바꿈' : '닉네임을 입력하고 Enter'),
+        el('span', null, state.locked ? '비밀번호를 입력하고 Enter' : state.nick ? '? for shortcuts · / 명령어 · Shift+Enter 줄바꿈' : '닉네임을 입력하고 Enter'),
         el('span', 'right', state.me ? `⏵⏵ #${state.active} · ${state.users.length} online` : '')
       );
       return;
@@ -565,7 +650,14 @@
     if (/(^|[^\w@])@claude\b/i.test(text)) local('', 'local', agentHelp());
   }
 
-  form.addEventListener('submit', (e) => { e.preventDefault(); submit(); });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (state.locked) return submitPassword(pw.value);
+    submit();
+  });
+  pw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); submitPassword(pw.value); }
+  });
   input.addEventListener('input', () => {
     autosize();
     state.suggestIdx = 0;
@@ -626,6 +718,10 @@
   log.addEventListener('click', () => { if (!getSelection().toString()) input.focus(); });
 
   renderChrome();
-  if (state.nick) connect();
-  else askNick();
+  (async () => {
+    const room = await roomInfo();
+    if (room && room.locked && !room.authed) return askPassword();
+    if (state.nick) connect();
+    else askNick();
+  })();
 })();

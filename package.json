@@ -1,7 +1,7 @@
 {
   "name": "lan-agent-chat",
   "productName": "LAN Chat",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "같은 네트워크(LAN)에서 쓰는 VS Code 스타일 채팅 — 일반 대화창과 개인 AI CLI 대화창 분리",
   "main": "app/main.js",
   "bin": {

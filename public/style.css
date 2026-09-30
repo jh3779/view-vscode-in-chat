@@ -171,3 +171,8 @@ body.in-app.other .traffic { display: none; }
 .tab.cli.active { border-top-color: var(--prompt); }
 .tab.cli .ico { color: var(--prompt); }
 .tree li.agent .ico.star { color: var(--prompt); }
+
+/* 방 비밀번호 입력 */
+.pw { flex: 1; border: 0; outline: 0; background: transparent; color: var(--fg-bright); font: 13px/20px var(--mono); padding: 0; }
+.pw::placeholder { color: #6a6a6a; }
+.msg.lock .bullet { color: var(--prompt); }
