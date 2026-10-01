@@ -21,6 +21,9 @@
         <button class="act active" data-panel="explorer" title="Explorer">
           <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
         </button>
+        <button class="act" data-panel="rooms" title="Rooms" id="actRooms" hidden>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        </button>
         <button class="act" data-panel="users" title="Online">
           <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M1 21v-1a7 7 0 0 1 14 0v1"/><path d="M16 4a4 4 0 0 1 0 8M23 21v-1a7 7 0 0 0-5-6.7"/></svg>
         </button>
@@ -39,6 +42,10 @@
         <section class="tree">
           <div class="tree-head">▾ ONLINE <span class="badge" id="userCount">0</span></div>
           <ul id="userList"></ul>
+        </section>
+        <section class="tree" id="roomsSection" hidden>
+          <div class="tree-head">▾ ROOMS <span class="badge" id="roomCount">0</span></div>
+          <ul id="roomList"></ul>
         </section>
       </aside>
 

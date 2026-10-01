@@ -12,6 +12,7 @@ const IS_MAC = process.platform === 'darwin';
 
 let launcher = null;
 let chat = null;
+let chatOrigin = ''; // 채팅 창이 머물러도 되는 origin. 방을 옮기면 갱신된다.
 let hosting = null; // { port, name, timer }
 const rooms = new Map(); // "ip:port" -> { ip, port, name, users, seen }
 
@@ -58,8 +59,28 @@ listenSocket.bind(DISCOVERY_PORT);
 setInterval(() => {
   const now = Date.now();
   for (const [k, r] of rooms) if (now - r.seen > ROOM_TTL_MS) rooms.delete(k);
-  if (launcher && !launcher.isDestroyed()) launcher.webContents.send('rooms', [...rooms.values()]);
+  const list = roomList();
+  if (launcher && !launcher.isDestroyed()) launcher.webContents.send('rooms', list);
+  if (chat && !chat.isDestroyed()) chat.webContents.send('rooms', list);
 }, 1000);
+
+// 내가 연 방도 목록에 포함시킨다 — 자기 비콘은 받지 못하기 때문이다.
+function roomList() {
+  const list = [...rooms.values()];
+  if (hosting) {
+    const mineKey = `${hosting.port}`;
+    if (!list.some((r) => String(r.port) === mineKey && isLoopbackOrSelf(r.ip))) {
+      list.unshift({
+        ip: 'localhost', port: hosting.port, name: hosting.name,
+        users: server.stats().users, locked: server.isLocked(), self: true, seen: Date.now(),
+      });
+    }
+  }
+  return list;
+}
+
+const selfAddresses = () => new Set(['localhost', '127.0.0.1', ...server.lanAddresses()]);
+const isLoopbackOrSelf = (ip) => selfAddresses().has(ip);
 
 // ---------- windows ----------
 function createLauncher() {
@@ -87,25 +108,26 @@ function openChat(baseUrl, nick, token) {
     backgroundColor: '#1e1e1e',
     titleBarStyle: IS_MAC ? 'hiddenInset' : 'default',
     trafficLightPosition: { x: 12, y: 9 },
-    webPreferences: { contextIsolation: true, sandbox: true },
+    webPreferences: {
+      preload: path.join(__dirname, 'chat-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+    },
   });
   // 외부 링크는 기본 브라우저로, 채팅 서버 밖으로의 이동은 차단
   chat.webContents.setWindowOpenHandler(({ url: target }) => {
     if (/^https?:\/\//.test(target)) shell.openExternal(target);
     return { action: 'deny' };
   });
+  chatOrigin = url.origin;
   chat.webContents.on('will-navigate', (e, target) => {
-    if (new URL(target).origin !== url.origin) e.preventDefault();
+    if (new URL(target).origin !== chatOrigin) e.preventDefault();
   });
   chat.loadURL(url.toString());
-  chat.on('closed', () => {
-    chat = null;
-    // 런처를 먼저, 동기적으로 띄운다. 창이 0개가 되는 순간 window-all-closed 가
-    // app.quit() 을 실행하는데, stopHosting() 의 await 가 그 전에 이벤트 루프를
-    // 내주기 때문이다(방장은 소켓 종료를 기다리므로 항상 앱이 먼저 죽었다).
-    createLauncher();
-    stopHosting();
-  });
+  // 채팅 창을 닫으면 앱을 끝낸다. 방을 옮길 때는 창을 닫는 대신 채팅 화면 안의
+  // ROOMS 목록에서 고른다(switch-room). 창이 0개가 되면 window-all-closed 가
+  // 받아 처리하므로 여기서 따로 종료를 부르지 않는다.
+  chat.on('closed', () => { chat = null; });
   if (launcher) launcher.close();
 }
 
@@ -202,8 +224,46 @@ ipcMain.handle('probe', async (_e, { address }) => {
   }
 });
 
+// 채팅 창 안에서 다른 방으로 이동한다. 창을 새로 만들지 않고 같은 창을 옮긴다.
+// 페이지가 스스로 이동하는 건 will-navigate 가 막고 있으므로, 반드시 여기를 거친다.
+ipcMain.handle('switch-room', async (_e, { ip, port, password, nick }) => {
+  if (!chat || chat.isDestroyed()) throw new Error('채팅 창이 없습니다');
+  const origin = `http://${ip}:${Number(port)}`;
+
+  let room;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 3000);
+  try {
+    const r = await fetch(`${origin}/api/room`, { signal: ctrl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    room = await r.json();
+  } catch (err) {
+    throw new Error(`${ip}:${port} 에 연결할 수 없습니다 (${err.name === 'AbortError' ? '시간 초과' : err.message})`);
+  } finally {
+    clearTimeout(t);
+  }
+
+  const token = room.locked ? await fetchToken(origin, password) : '';
+  const url = new URL(origin);
+  if (nick) url.searchParams.set('nick', String(nick).slice(0, 20));
+  if (token) url.searchParams.set('token', token);
+  // 이동 후에도 창 밖으로 못 나가도록 허용 origin 을 새 방으로 바꾼다.
+  chatOrigin = url.origin;
+  await chat.loadURL(url.toString());
+  return { ok: true, locked: Boolean(room.locked) };
+});
+
 ipcMain.handle('info', () => ({ addresses: server.lanAddresses(), platform: process.platform, version: app.getVersion() }));
 
 app.whenReady().then(createLauncher);
 app.on('window-all-closed', () => app.quit());
-app.on('before-quit', () => { if (hosting) server.stop(); });
+
+// 방을 열어 둔 채 끝내면 손님들이 끊김 통보 없이 남는다. 한 번만 가로채
+// 서버를 닫고 다시 종료한다.
+let quitting = false;
+app.on('before-quit', (e) => {
+  if (quitting || !hosting) return;
+  e.preventDefault();
+  quitting = true;
+  stopHosting().finally(() => app.quit());
+});
