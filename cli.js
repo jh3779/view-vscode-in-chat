@@ -47,6 +47,11 @@ function ensureKey() {
   return require('crypto').randomUUID().replace(/-/g, '');
 }
 
+if (!fs.existsSync(options.cwd) || !fs.statSync(options.cwd).isDirectory()) {
+  console.error(`작업 폴더가 없습니다: ${options.cwd}`);
+  process.exit(1);
+}
+
 const saveConfig = (patch) => {
   Object.assign(config, patch);
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch {}
@@ -281,7 +286,7 @@ async function post(payload) {
     const r = await fetch(`${state.base}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: state.me.id, channel: state.channel, ...payload }),
+      body: JSON.stringify({ secret: state.me.secret, channel: state.channel, ...payload }),
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok && payload.type !== 'typing') print(RED(`✗ ${d.error || `오류 (${r.status})`}`));
@@ -337,7 +342,8 @@ async function connect() {
 
 function handleEvent(event, d, first) {
   if (event === 'welcome') {
-    state.me = { id: d.id, nick: d.nick, color: d.color };
+    // secret 은 쓰기 자격이다. 메모리에만 두고 파일에 저장하지 않는다.
+    state.me = { id: d.id, nick: d.nick, color: d.color, secret: d.secret };
     state.nick = d.nick;
     state.channels = d.channels;
     state.users = d.users;
