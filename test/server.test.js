@@ -64,7 +64,7 @@ async function connect({ key, nick, kind = 'web' } = {}) {
     post: (body) => fetch(`${base}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: welcome.id, channel: 'general', ...body }),
+      body: JSON.stringify({ secret: welcome.secret, channel: 'general', ...body }),
     }),
   };
   open.push(client);
@@ -165,7 +165,7 @@ test('본문 상한을 넘으면 소켓을 끊지 않고 413 으로 응답한다
   const r = await fetch(`${base}/send`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: c.welcome.id, type: 'chat', text: 'x'.repeat(64 * 1024) }),
+    body: JSON.stringify({ secret: c.welcome.secret, type: 'chat', text: 'x'.repeat(64 * 1024) }),
   });
   assert.equal(r.status, 413);
 });
@@ -177,13 +177,15 @@ test('claude 는 예약 닉네임이라 사람이 쓸 수 없다', async () => {
   assert.equal(r.status, 400, '변경 요청도 거부되어야 한다');
 });
 
-test('알 수 없는 클라이언트 id 는 거부된다', async () => {
-  const r = await fetch(`${base}/send`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: 'nope', type: 'chat', text: 'hi' }),
-  });
-  assert.equal(r.status, 401);
+test('발신자 자격이 없으면 거부된다', async () => {
+  for (const body of [{ type: 'chat', text: 'hi' }, { secret: 'nope', type: 'chat', text: 'hi' }]) {
+    const r = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(r.status, 401);
+  }
 });
 
 test('정적 파일 경로가 public 밖으로 나가지 못한다', async () => {

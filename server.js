@@ -15,17 +15,22 @@ const MAX_LOG_TEXT = 500;
 const AGENT = { nick: 'claude', color: '#d7875f' };
 const DEFAULT_CHANNELS = ['general', 'random', 'dev'];
 
+// 조회 표는 프로토타입 없이 만든다. 그냥 객체 리터럴이면 `toString`, `__proto__`,
+// `constructor` 같은 이름이 "표에 있는 것처럼" 조회돼, 기본 거부를 통과한 뒤
+// 뒷단에서 터진다(이슈 #3). 표에 없는 이름은 확실히 undefined 여야 한다.
+const table = (o) => Object.assign(Object.create(null), o);
+
 // ---------- 전송 정책 ----------
 // 종류별 토큰 버킷. handleSend 입구에서 단 한 번 적용하므로 특정 타입만 빠져나가는 경로가 없다.
 // POLICY에 없는 타입은 거부되므로, 새 타입을 추가하면서 제한을 빠뜨릴 수 없다.
-const BUCKETS = {
+const BUCKETS = table({
   say: { capacity: 6, refillMs: 300 }, // 사람이 직접 보내는 메시지
   hint: { capacity: 2, refillMs: 1000 }, // 저장되지 않는 일시 신호
   agent: { capacity: 30, refillMs: 200 }, // 에이전트 출력 — 도구 로그가 연달아 온다
   auth: { capacity: 5, refillMs: 10000 }, // 비밀번호 시도 — 무차별 대입 방어
-};
+});
 
-const POLICY = {
+const POLICY = table({
   chat: { bucket: 'say', maxText: MAX_TEXT },
   action: { bucket: 'say', maxText: MAX_TEXT },
   cli: { bucket: 'say', maxText: MAX_TEXT },
@@ -36,7 +41,7 @@ const POLICY = {
   'agent-idle': { bucket: 'hint', quiet: true },
   'agent-text': { bucket: 'agent', maxText: MAX_AGENT_TEXT },
   'agent-log': { bucket: 'agent', maxText: MAX_LOG_TEXT },
-};
+});
 
 // 1000자마다 토큰을 하나 더 쓴다 — 긴 메시지가 짧은 메시지와 같은 값이 되지 않도록.
 const costOf = (text) => 1 + Math.floor(text.length / 1000);
@@ -62,6 +67,7 @@ const authTries = new Map(); // ip -> { buckets }
 function setPassword(pw) {
   const s = String(pw || '');
   tokens.clear();
+  bySecret.clear();
   // 이전 실패 횟수는 지금 없어진 비밀번호에 대한 것이므로 함께 비운다.
   // 비밀번호를 바꿀 수 있는 건 방장뿐이라 이 초기화가 공격자에게 열려 있지 않다.
   authTries.clear();
@@ -100,20 +106,25 @@ function authAllowed(ip) {
   return take(holder, 'auth', 1);
 }
 
-const MIME = {
+const MIME = table({
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
-};
+});
 
 // channel -> message[]   (일반 대화창 — 방 전체 공유)
 const history = new Map(DEFAULT_CHANNELS.map((c) => [c, []]));
 // key -> message[]       (CLI 대화창 — 소유자에게만 전송, 방 히스토리와 절대 섞이지 않는다)
 const cliHistory = new Map();
-// clientId -> { id, nick, color, res, kind, key, buckets }
+// clientId -> { id, nick, color, res, kind, key, secret, buckets }
+// id 는 참가자 목록으로 모두에게 공개되는 '표시용 번호'다. 쓰기 자격으로 쓰면
+// 남의 ID 만 알아도 그 사람 행세를 할 수 있다(이슈 #4).
 const clients = new Map();
+// secret -> client. 쓰기는 오직 이 비공개 값으로만 주인을 찾는다.
+// secret 은 welcome 으로 본인에게만 가고, 어떤 목록·메시지에도 실리지 않는다.
+const bySecret = new Map();
 
 const COLORS = ['#4fc1ff', '#c586c0', '#dcdcaa', '#4ec9b0', '#ce9178', '#b5cea8', '#d7ba7d', '#9cdcfe', '#f48771'];
 
@@ -240,11 +251,14 @@ function handleEvents(req, res, url) {
 
   const kind = url.searchParams.get('client') === 'cli' ? 'cli' : 'web';
   const key = sanitizeKey(url.searchParams.get('key')) || crypto.randomUUID().replace(/-/g, '');
-  const client = { id, nick, color, res, kind, key, buckets: {} };
+  const secret = crypto.randomBytes(24).toString('base64url');
+  const client = { id, nick, color, res, kind, key, secret, buckets: {} };
   clients.set(id, client);
+  bySecret.set(secret, client);
 
   send(res, 'welcome', {
     id,
+    secret, // 쓰기 자격. 본인에게만 간다 — 로그·화면·다른 요청에 싣지 말 것
     nick,
     color,
     key, // 클라이언트가 없거나 형식이 틀렸으면 새로 발급된 값 — 기기에 저장해 두면 다음에도 같은 CLI 대화창을 연다
@@ -261,6 +275,7 @@ function handleEvents(req, res, url) {
   req.on('close', () => {
     clearInterval(ping);
     clients.delete(id);
+    bySecret.delete(secret);
     broadcast('users', userList());
     system('general', `Leave(${nick})\n⎿  연결이 종료되었습니다`);
   });
@@ -273,8 +288,9 @@ async function handleSend(req, res) {
   } catch (e) {
     return json(res, e.status || 400, { error: e.message });
   }
-  const client = clients.get(body.id);
-  if (!client) return json(res, 401, { error: 'unknown client' });
+  // 공개 id 는 받지 않는다. 비공개 secret 을 가진 사람만 그 자리에서 말할 수 있다.
+  const client = bySecret.get(String(body.secret || ''));
+  if (!client) return json(res, 401, { error: '발신자 자격이 없습니다. 다시 접속해 주세요.' });
 
   const type = body.type || 'chat';
   const rule = POLICY[type];
@@ -379,7 +395,14 @@ async function handleAuth(req, res) {
 }
 
 function serveStatic(req, res, url) {
-  const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
+  let rel;
+  try {
+    // `/%` 처럼 깨진 퍼센트 인코딩이면 decodeURIComponent 가 URIError 를 던진다.
+    rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
+  } catch {
+    res.writeHead(400);
+    return res.end('bad request');
+  }
   const file = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR + path.sep)) {
     res.writeHead(403);
@@ -395,7 +418,7 @@ function serveStatic(req, res, url) {
   });
 }
 
-const server = http.createServer((req, res) => {
+function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'GET' && url.pathname === '/events') return handleEvents(req, res, url);
   if (req.method === 'GET' && url.pathname === '/api/room') return handleRoomInfo(res, url);
@@ -404,6 +427,31 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET') return serveStatic(req, res, url);
   res.writeHead(405);
   res.end();
+}
+
+// 한 사람의 잘못된 요청이 방 전체를 끊어서는 안 된다. 처리 중 예외가 나면 그 요청만
+// 500 으로 끝내고 서버는 계속 돌아간다. 개별 지점을 막는 것으로는 다음 지점이 또
+// 생기므로, 입구에 울타리를 둔다(이슈 #3).
+function requestFailed(res, err) {
+  console.error('요청 처리 중 오류:', (err && err.stack) || err);
+  if (res.headersSent || res.writableEnded) return res.destroy();
+  json(res, 500, { error: '요청을 처리하지 못했습니다.' });
+}
+
+const server = http.createServer((req, res) => {
+  try {
+    const done = route(req, res);
+    // async 핸들러의 거부는 던지지 않고 흘러나간다 — Node 는 이것도 프로세스로 끝낸다.
+    if (done && typeof done.catch === 'function') done.catch((e) => requestFailed(res, e));
+  } catch (e) {
+    requestFailed(res, e);
+  }
+});
+
+// 헤더가 깨진 요청 등 Node 가 직접 올리는 오류. 기본 동작은 소켓만 끊는 것이라
+// 치명적이지 않지만, 조용히 사라지지 않도록 남긴다.
+server.on('clientError', (err, socket) => {
+  if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
 });
 
 function listen(port, host, attempts) {
@@ -433,6 +481,7 @@ async function start({ port = PORT, host = '0.0.0.0', password = '' } = {}) {
 function stop() {
   for (const c of clients.values()) c.res.end();
   clients.clear();
+  bySecret.clear();
   tokens.clear();
   authTries.clear();
   const closed = new Promise((resolve) => server.close(() => resolve()));

@@ -350,7 +350,8 @@
 
     es.addEventListener('welcome', (e) => {
       const d = JSON.parse(e.data);
-      state.me = { id: d.id, nick: d.nick, color: d.color };
+      // secret 은 쓰기 자격이다. 메모리에만 두고 저장하지 않는다 — 재접속하면 새로 받는다.
+      state.me = { id: d.id, nick: d.nick, color: d.color, secret: d.secret };
       state.channels = d.channels;
       state.history = d.history;
       state.users = d.users;
@@ -569,7 +570,7 @@
       const r = await fetch('/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: state.me.id, channel: state.active, ...payload }),
+        body: JSON.stringify({ secret: state.me.secret, channel: state.active, ...payload }),
       });
       const d = await r.json();
       if (!r.ok) local(d.error || `오류 (${r.status})`, 'error');

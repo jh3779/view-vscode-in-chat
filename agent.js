@@ -160,7 +160,17 @@ function runAgent({ bin, prompt, cwd, session, model, tools = DEFAULT_TOOLS, onE
     }
   });
   child.stderr.on('data', (c) => { stderr = (stderr + c.toString('utf8')).slice(-2000); });
-  child.on('error', (err) => finish({ kind: 'error', message: `claude 실행 실패: ${err.message}` }));
+  child.on('error', (err) => {
+    // spawn 의 ENOENT 는 실행 파일이 없을 때뿐 아니라 cwd 가 없을 때도 난다.
+    // 메시지가 실행 파일을 탓하면 엉뚱한 곳을 보게 되므로 구분해서 알려 준다.
+    const missingCwd = err.code === 'ENOENT' && !fs.existsSync(cwd);
+    finish({
+      kind: 'error',
+      message: missingCwd
+        ? `작업 폴더가 없습니다: ${cwd}  (/agent cwd <폴더> 로 바꾸세요)`
+        : `claude 실행 실패: ${err.message}`,
+    });
+  });
   child.on('close', (code, signal) => {
     if (stopped === 'timeout') finish({ kind: 'error', message: `시간 초과 (${TIMEOUT_MS / 60000}분)` });
     else if (stopped || signal) finish({ kind: 'error', message: '중단되었습니다', interrupted: true });
