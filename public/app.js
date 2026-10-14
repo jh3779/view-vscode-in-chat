@@ -13,6 +13,8 @@
     ['/who', '접속자 목록'],
     ['/me', '<행동>  행동 메시지'],
     ['/clear', '화면 지우기 (내 화면만)'],
+    ['/rooms', '같은 네트워크의 다른 방 목록'],
+    ['/room', '<IP:포트>  그 방으로 이동'],
     ['/cli', '내 에이전트 창 보기 (나만 보임)'],
     ['/key', '[값]  CLI 창 연결 키 보기/바꾸기'],
     ['/agent', '에이전트 사용법 (터미널 클라이언트에서 실행)'],
@@ -44,7 +46,12 @@
     locked: false,
     cli: [], // 내 CLI 대화창 — 서버가 같은 키를 가진 내 연결에만 보낸다
     cliTyping: null,
+    rooms: [], // 같은 네트워크의 방 (Electron 앱에서만 채워진다)
+    pendingRoom: null, // 비밀번호를 기다리는 이동 대상
   };
+
+  // 방 검색은 UDP 라 브라우저에서는 할 수 없다. 앱에서만 목록이 들어온다.
+  const APP_ROOMS = typeof lanRooms !== 'undefined' ? lanRooms : null;
 
   // CLI 대화창 소유권 키. 브라우저에서 만들지 않고 서버가 발급한 값을 저장만 한다.
   // crypto.randomUUID() 는 보안 컨텍스트 전용이라 http://<LAN-IP> 에는 없고,
@@ -256,6 +263,51 @@
     $('sbUsers').textContent = `${state.users.length} online`;
   }
 
+  const sameRoom = (r) => `${r.ip}:${r.port}` === location.host
+    || (r.self && String(r.port) === location.port);
+
+  function renderRooms() {
+    const section = $('roomsSection');
+    const actBtn = $('actRooms');
+    if (!APP_ROOMS) { section.hidden = true; actBtn.hidden = true; return; }
+    section.hidden = false;
+    actBtn.hidden = false;
+    $('roomCount').textContent = state.rooms.length;
+
+    const ul = $('roomList');
+    ul.replaceChildren();
+    if (!state.rooms.length) {
+      const li = el('li', 'room');
+      li.append(el('span', 'ico', '·'), el('span', 'state', '찾는 중…'));
+      ul.append(li);
+      return;
+    }
+    for (const r of state.rooms) {
+      const here = sameRoom(r);
+      const li = el('li', `room${here ? ' here' : ''}${r.self ? ' mine' : ''}`);
+      li.append(el('span', 'ico', r.locked ? '🔒' : '✻'), el('span', null, r.name || `${r.ip}:${r.port}`));
+      li.append(el('span', 'state', here ? '지금 여기' : r.self ? '내 방' : `${r.users}명`));
+      li.title = `${r.ip}:${r.port}`;
+      if (!here) li.onclick = () => goRoom(r);
+      ul.append(li);
+    }
+  }
+
+  // 방 이동. 잠긴 방이면 비밀번호를 먼저 받는다.
+  async function goRoom(room) {
+    if (!APP_ROOMS) return local('방 이동은 앱에서만 됩니다. 브라우저에서는 주소로 직접 접속하세요.', 'error');
+    if (room.locked) {
+      state.pendingRoom = room;
+      return askPassword(`🔒 ${room.name || `${room.ip}:${room.port}`} — 비밀번호를 입력하세요.`);
+    }
+    local(`${room.name || `${room.ip}:${room.port}`} (으)로 이동하는 중…`, 'system');
+    try {
+      await APP_ROOMS.switchTo(room, '', state.nick);
+    } catch (e) {
+      local(String(e.message).replace(/^Error invoking remote method '\w+': (Error: )?/, ''), 'error');
+    }
+  }
+
   function renderChrome() {
     const label = isCli() ? CLI_TAB : `${state.active}.chat`;
     $('title').textContent = `${label} — ${location.host}`;
@@ -265,6 +317,7 @@
     $('sbNick').textContent = state.me ? `👤 ${state.me.nick}` : '';
     renderTabs();
     renderChannels();
+    renderRooms();
     renderTyping();
     renderSuggest();
     safeSet('vschat.tabs', JSON.stringify(state.tabs));
@@ -436,6 +489,13 @@
     pw.focus();
   }
 
+  function cancelRoomSwitch() {
+    state.pendingRoom = null;
+    state.locked = false;
+    leavePasswordStep();
+    renderChannelView();
+  }
+
   function leavePasswordStep() {
     pw.hidden = true;
     pw.value = '';
@@ -481,6 +541,20 @@
     leavePasswordStep();
     if (!state.nick) return askNick();
     connect();
+  }
+
+  // 다른 방으로 이동하려고 받은 비밀번호는 이 서버가 아니라 그 방에 보낸다.
+  async function submitRoomPassword(value) {
+    const room = state.pendingRoom;
+    if (!room) return;
+    local('확인하는 중…', 'system');
+    try {
+      await APP_ROOMS.switchTo(room, value, state.nick);
+    } catch (e) {
+      pw.value = '';
+      pw.focus();
+      local(String(e.message).replace(/^Error invoking remote method '\w+': (Error: )?/, ''), 'error');
+    }
   }
 
   function setConn(ok, text) {
@@ -546,6 +620,24 @@
       }
       case '/me': return arg ? post({ type: 'action', text: arg }) : local('사용법: /me <행동>', 'error');
       case '/clear': return log.replaceChildren();
+      case '/rooms': {
+        if (!APP_ROOMS) return local('방 검색은 앱에서만 됩니다 (브라우저는 UDP 검색 불가).', 'error');
+        const pre = el('div', 'tree-out');
+        if (!state.rooms.length) pre.append('└ 찾은 방이 없습니다\n');
+        state.rooms.forEach((r, i, a) => {
+          pre.append(i === a.length - 1 ? '└ ' : '├ ',
+            el('b', null, `${r.locked ? '🔒 ' : ''}${r.name || '이름 없는 방'}`),
+            `  ${r.ip}:${r.port} · ${r.users}명${sameRoom(r) ? ' · 지금 여기' : ''}\n`);
+        });
+        return local('', 'local', pre);
+      }
+      case '/room': {
+        if (!arg) return local('사용법: /room <IP:포트>', 'error');
+        const m = arg.match(/^([^\s:]+):(\d{1,5})$/);
+        if (!m) return local('주소 형식이 올바르지 않습니다. 예: /room 172.30.1.86:3000', 'error');
+        const found = state.rooms.find((r) => r.ip === m[1] && String(r.port) === m[2]);
+        return goRoom(found || { ip: m[1], port: Number(m[2]), locked: false, name: arg });
+      }
       case '/cli': return openChannel(CLI_TAB);
       case '/key': {
         if (!arg) {
@@ -652,11 +744,16 @@
 
   form.addEventListener('submit', (e) => {
     e.preventDefault();
+    if (state.pendingRoom) return submitRoomPassword(pw.value);
     if (state.locked) return submitPassword(pw.value);
     submit();
   });
   pw.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); submitPassword(pw.value); }
+    if (e.key === 'Escape' && state.pendingRoom) { e.preventDefault(); return cancelRoomSwitch(); }
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      state.pendingRoom ? submitRoomPassword(pw.value) : submitPassword(pw.value);
+    }
   });
   input.addEventListener('input', () => {
     autosize();
@@ -699,13 +796,18 @@
   });
 
   // activity bar / sidebar
+  const PANEL_SECTION = { explorer: 'channelList', users: 'userList', rooms: 'roomsSection' };
   document.querySelectorAll('.act[data-panel]').forEach((b) => {
     b.onclick = () => {
       const sb = $('sidebar');
       const wasActive = b.classList.contains('active');
       document.querySelectorAll('.act[data-panel]').forEach((x) => x.classList.remove('active'));
-      if (wasActive) sb.classList.add('hidden');
-      else { b.classList.add('active'); sb.classList.remove('hidden'); }
+      if (wasActive && !sb.classList.contains('hidden')) return sb.classList.add('hidden');
+      b.classList.add('active');
+      sb.classList.remove('hidden');
+      // 사이드바에 세 영역이 함께 있으므로, 고른 영역으로 스크롤해 준다.
+      const target = $(PANEL_SECTION[b.dataset.panel] || '');
+      if (target && target.scrollIntoView) target.scrollIntoView({ block: 'nearest' });
     };
   });
   if (matchMedia('(max-width: 760px)').matches) {
@@ -716,6 +818,13 @@
   $('newChannel').onclick = () => { input.value = '/join '; input.focus(); renderSuggest(); };
   document.addEventListener('visibilitychange', () => { if (!document.hidden) renderChrome(); });
   log.addEventListener('click', () => { if (!getSelection().toString()) input.focus(); });
+
+  if (APP_ROOMS) {
+    APP_ROOMS.onRooms((list) => {
+      state.rooms = Array.isArray(list) ? list : [];
+      renderRooms();
+    });
+  }
 
   renderChrome();
   (async () => {

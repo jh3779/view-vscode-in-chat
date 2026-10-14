@@ -176,3 +176,11 @@ body.in-app.other .traffic { display: none; }
 .pw { flex: 1; border: 0; outline: 0; background: transparent; color: var(--fg-bright); font: 13px/20px var(--mono); padding: 0; }
 .pw::placeholder { color: #6a6a6a; }
 .msg.lock .bullet { color: var(--prompt); }
+
+/* ROOMS — 채팅 창 안에서 다른 방으로 이동 */
+.tree li.room { padding-left: 22px; }
+.tree li.room .ico { color: var(--prompt); }
+.tree li.room .state { margin-left: auto; color: var(--fg-dim); font-size: 11px; }
+.tree li.room.here { background: var(--select); color: var(--fg-bright); }
+.tree li.room.here .state { color: var(--green); }
+.tree li.room.mine .state { color: var(--accent); }
